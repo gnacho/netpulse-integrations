@@ -11,16 +11,18 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 | Directory | Transport | Coverage |
 |---|---|---|
 | `routeros/` | RouterOS binary API, REST fallback | System, ports, DHCP, ARP, FDB, temperature, firmware state, flash and WAN rates |
+| `asuswrt/` | Portable probes on Asuswrt/Merlin | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 
 ## Install
 
 Build the agent you need. The binaries are static Go programs and do not require Docker.
 
 ```sh
-go build -o routeros-pusher ./routeros/cmd/routeros-pusher
+CGO_ENABLED=0 go build -o routeros-pusher ./routeros/cmd/routeros-pusher
+CGO_ENABLED=0 go build -o asuswrt-pusher ./asuswrt/cmd/asuswrt-pusher
 ```
 
-Create an external router in NetPulse, obtain its agent token and run the pusher with its environment variables. Each integration README documents the variables, the systemd unit and the data it collects.
+Create an external router in NetPulse, obtain its agent token and run the pusher with its environment variables. Each integration README documents the variables, service or boot setup, upgrades and collected data.
 
 The ingest contract, authentication, payload semantics and contribution rules are in the NetPulse guide:
 

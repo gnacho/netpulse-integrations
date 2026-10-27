@@ -1,4 +1,5 @@
-routeros-pusher
+/routeros-pusher
+/asuswrt-pusher
 *.test
 *.out
 .DS_Store

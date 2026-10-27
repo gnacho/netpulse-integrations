@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Restored the documented `routeros-pusher` entrypoint and connected it to the current RouterOS poller.
+
 ## 0.1.0 - 2026-10-26
 
 - First external RouterOS pusher.

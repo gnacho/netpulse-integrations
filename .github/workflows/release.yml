@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'routeros/v*'
+      - 'asuswrt/v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve integration
+        id: integration
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in
+            routeros/v*)
+              name=routeros
+              arch=amd64
+              ;;
+            asuswrt/v*)
+              name=asuswrt
+              arch=arm64
+              ;;
+            *)
+              echo "Unsupported tag: $TAG" >&2
+              exit 1
+              ;;
+          esac
+          version=${TAG#*/v}
+          if [ -z "$version" ]; then
+            echo "Empty version in tag: $TAG" >&2
+            exit 1
+          fi
+          {
+            echo "name=$name"
+            echo "arch=$arch"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build static pusher
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ steps.integration.outputs.arch }}
+          VERSION: ${{ steps.integration.outputs.version }}
+          NAME: ${{ steps.integration.outputs.name }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" \
+            -o "dist/$NAME-pusher" "./$NAME/cmd/$NAME-pusher"
+      - name: Package release
+        env:
+          NAME: ${{ steps.integration.outputs.name }}
+          ARCH: ${{ steps.integration.outputs.arch }}
+          VERSION: ${{ steps.integration.outputs.version }}
+        run: |
+          set -eu
+          cd dist
+          asset="${NAME}_${VERSION}_linux_${ARCH}.tar.gz"
+          tar -czf "$asset" "$NAME-pusher"
+          sha256sum "$asset" > "$asset.sha256"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          NAME: ${{ steps.integration.outputs.name }}
+          ARCH: ${{ steps.integration.outputs.arch }}
+          VERSION: ${{ steps.integration.outputs.version }}
+        run: |
+          asset="${NAME}_${VERSION}_linux_${ARCH}.tar.gz"
+          gh release create "$TAG" "dist/$asset" "dist/$asset.sha256" \
+            --title "$TAG" --generate-notes

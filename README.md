@@ -38,7 +38,7 @@ go vet ./...
 go test ./...
 ```
 
-CI runs the same checks for every pull request.
+CI runs the same checks, race-enabled tests and static builds for every pull request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and publish a static Linux binary tarball with its SHA-256 file. RouterOS releases currently target amd64 and Asuswrt releases target ARM64.
 
 ## Adding an integration
 
@@ -47,7 +47,7 @@ CI runs the same checks for every pull request.
 3. Keep vendor credentials and parsing inside that directory. Ask NetPulse maintainers for neutral contract fields before depending on them.
 4. Include fixtures, tests and evidence from real hardware.
 5. Add a `CODEOWNERS` entry for the directory. The owner of the hardware maintains it and validates releases.
-6. Tag releases per integration, for example `routeros/v0.1.0`.
+6. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
 

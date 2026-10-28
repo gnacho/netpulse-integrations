@@ -12,11 +12,14 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 |---|---|---|
 | `routeros/` | RouterOS binary API, REST fallback | System, ports, DHCP, ARP, FDB, temperature, firmware state, flash and WAN rates |
 | `bbox/` | Bbox local HTTPS API | System, WAN, active hosts and Ethernet port rates |
+| `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 
 ## Install
 
 Build the shared supervisor. It runs configured vendor pollers in one process
-and does not require Docker.
+and does not require Docker. The Asuswrt poller uses local shell probes, so the
+supervisor must run on the Asuswrt/Merlin device when that integration is
+configured.
 
 ```sh
 go build -trimpath -o netpulse-integrations ./cmd/integrations-supervisor
@@ -42,16 +45,16 @@ go vet ./...
 go test ./...
 ```
 
-CI runs the same checks for every pull request.
+CI runs the same checks, race-enabled tests and static builds for every pull request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and publish a static Linux binary tarball with its SHA-256 file. RouterOS releases currently target amd64 and Asuswrt releases target ARM64.
 
 ## Adding an integration
 
 1. Open an issue in the NetPulse repository with the router model, firmware, API documentation, available data and a read-only first scope.
 2. Add a directory named after the family, with `README.md` and `CHANGELOG.md`; keep its poller and vendor-specific details inside that directory.
-3. Keep vendor credentials and parsing inside that directory. Ask NetPulse maintainers for neutral contract fields before depending on them.
+3. Add a poller constructor to the shared supervisor. Keep vendor credentials and parsing inside that directory. Ask NetPulse maintainers for neutral contract fields before depending on them.
 4. Include fixtures, tests and evidence from real hardware.
 5. Add a `CODEOWNERS` entry for the directory. The owner of the hardware maintains it and validates releases.
-6. Tag releases per integration, for example `routeros/v0.1.0`.
+6. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
 

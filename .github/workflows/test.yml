@@ -25,3 +25,11 @@ jobs:
           fi
       - run: go vet ./...
       - run: go test ./...
+      - run: go test -race ./...
+      - name: Build static pushers
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+        run: |
+          GOARCH=amd64 go build -trimpath -o /tmp/routeros-pusher ./routeros/cmd/routeros-pusher
+          GOARCH=arm64 go build -trimpath -o /tmp/asuswrt-pusher ./asuswrt/cmd/asuswrt-pusher

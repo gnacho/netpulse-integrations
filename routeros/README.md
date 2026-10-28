@@ -20,53 +20,34 @@ The binary API on port 8728 is preferred. REST is a fallback for installations t
 
 The agent does not change router configuration, install firmware or perform upgrades.
 
-## Build
-
-```sh
-go build -trimpath -ldflags "-s -w -X main.Version=0.1.0" -o routeros-pusher ./cmd/routeros-pusher
-```
-
 ## Configure
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `ROUTEROS_HOST` | yes | Router host or REST base URL, for example `192.168.88.1` or `https://192.168.88.1:8443` |
-| `ROUTEROS_USER` | yes | RouterOS API user with read access |
-| `ROUTEROS_PASS` | yes | Password for that user |
-| `ROUTEROS_INSECURE` | no | `1` skips TLS verification for a self-signed REST certificate |
-| `NETPULSE_SERVER` | yes | NetPulse base URL, for example `https://netpulse.example:3000` |
-| `NETPULSE_TOKEN` | yes | Agent token for the external router |
-| `NETPULSE_SLUG` | yes | Router slug in NetPulse |
-| `NETPULSE_INTERVAL` | no | Poll interval as a Go duration, default `30s` |
+Add an object to the shared supervisor config's `integrations` array:
+
+```json
+{
+  "type": "routeros",
+  "slug": "mikrotik-core",
+  "token": "REPLACE_WITH_AGENT_TOKEN",
+  "interval": "30s",
+  "host": "192.168.88.1",
+  "user": "netpulse-readonly",
+  "password": "REPLACE_WITH_ROUTEROS_PASSWORD",
+  "insecure": false
+}
+```
 
 Create the router in NetPulse with type `external`, then create or rotate its token with an authenticated `POST /api/agents` and body `{"slug":"<slug>"}`. The response contains the token. Rotating the token invalidates the previous one.
 
 The token is a secret. Keep it out of the repository, tickets, logs and shell history.
 
-## Run with systemd
-
-```ini
-[Unit]
-Description=NetPulse RouterOS pusher
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=netpulse
-EnvironmentFile=/etc/netpulse-routeros.env
-ExecStart=/usr/local/bin/routeros-pusher
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-The environment file contains the router password and the agent token. Restrict it to the service user:
+The same supervisor can run RouterOS and Bbox entries. Keep the JSON config
+readable only by its service account; it contains router passwords and agent
+tokens. Install the one shared unit from
+[`../deploy/netpulse-integrations.service`](../deploy/netpulse-integrations.service).
 
 ```sh
-chmod 600 /etc/netpulse-routeros.env
+go build -trimpath -o netpulse-integrations ./cmd/integrations-supervisor
 ```
 
 ## Verify
@@ -77,7 +58,7 @@ go vet ./...
 gofmt -l .
 ```
 
-Logs go to stderr through `slog`. A successful cycle logs `routeros-pusher: pushed`. A failed poll or push logs the error and retries on the next tick.
+Logs go to stderr through `slog`. Successful cycles log `integration pushed` with vendor and slug. A failed poll or push logs the error and retries on the next cycle.
 
 ## Notes
 

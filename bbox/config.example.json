@@ -1,0 +1,15 @@
+{
+  "server": "https://netpulse.example:3000",
+  "timeout": "15s",
+  "integrations": [
+    {
+      "type": "bbox",
+      "slug": "living-room-bbox",
+      "token": "REPLACE_WITH_NETPULSE_AGENT_TOKEN",
+      "interval": "60s",
+      "host": "192.168.1.1",
+      "password": "REPLACE_WITH_BBOX_ADMIN_PASSWORD",
+      "insecure": false
+    }
+  ]
+}

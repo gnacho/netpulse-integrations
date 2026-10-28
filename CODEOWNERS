@@ -4,5 +4,4 @@
 # Each integration directory has the person who can test the hardware.
 /routeros/ @gnacho
 
-# Add new integrations here when their maintainer accepts ownership.
-# /bbox/ @juflo
+/bbox/ @juflo

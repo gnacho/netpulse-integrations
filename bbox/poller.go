@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,18 @@ type wanSample struct {
 	rx, tx           uint64
 	rxValid, txValid bool
 	at               time.Time
+}
+
+// wirelessAPIResponse deliberately models only BSSID and enable state.
+// Unknown security fields (including Wi-Fi passphrases) are discarded by
+// encoding/json and can never reach the payload or logs.
+type wirelessAPIResponse struct {
+	Wireless struct {
+		SSID map[string]struct {
+			BSSID  string `json:"bssid"`
+			Enable any    `json:"enable"`
+		} `json:"ssid"`
+	} `json:"wireless"`
 }
 
 func New(cfg Config, logger *slog.Logger) (*Poller, error) {
@@ -111,6 +124,15 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 			continue
 		}
 		responses[path] = value
+	}
+	var wireless []wirelessAPIResponse
+	if err := p.api.get(ctx, "/wireless", &wireless); err != nil {
+		if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() {
+			return nil, err
+		}
+		failed = append(failed, "/wireless")
+	} else {
+		responses["/wireless"] = wireless
 	}
 	if len(failed) != 0 {
 		p.logger.Warn("optional Bbox endpoints unavailable", "paths", strings.Join(failed, ","))
@@ -234,9 +256,15 @@ func (p *Poller) translate(device any, r map[string]any, now time.Time) *probe.P
 	board.Release.Version = version
 	board.Release.Description = version
 	system := &probe.SystemData{Board: board}
+	if uptime := number(dev, "uptime"); uptime != 0 {
+		system.SysInfo = &probe.SysInfo{Uptime: float64(uptime)}
+	}
 	if mem, ok := r["/device/mem"]; ok {
 		memory := object(find(mem, "mem"))
-		info := &probe.SysInfo{Uptime: float64(number(dev, "uptime"))}
+		info := system.SysInfo
+		if info == nil {
+			info = &probe.SysInfo{}
+		}
 		// Bbox memory counters are KiB; the shared payload uses bytes.
 		info.Memory.Total = float64(number(memory, "total")) * 1024
 		info.Memory.Free = float64(number(memory, "free")) * 1024
@@ -276,9 +304,15 @@ func (p *Poller) translate(device any, r map[string]any, now time.Time) *probe.P
 		data.DHCP = &probe.DHCPData{Leases: leases}
 		data.Wireless = &probe.WirelessData{Clients: clients, Radios: []probe.Radio{}}
 	}
+	if ownBSSIDs := parseOwnBSSIDs(r["/wireless"]); len(ownBSSIDs) != 0 {
+		if data.Wireless == nil {
+			data.Wireless = &probe.WirelessData{Clients: map[string]probe.WirelessClient{}, Radios: []probe.Radio{}}
+		}
+		data.Wireless.OwnBssids = ownBSSIDs
+	}
 	if wan, ok := r["/wan/ip"]; ok {
-		ip, dns := parseWAN(wan)
-		data.Wan = &probe.WanInfo{IP: ip, DNS: dns}
+		wanInfo := parseWAN(wan)
+		data.Wan = &wanInfo
 	}
 	if stats, ok := r["/wan/ip/stats"]; ok {
 		system.RxBps, system.TxBps = parseWANRates(stats, p.prevWAN, now)
@@ -327,7 +361,9 @@ func parseHosts(v any) ([]probe.DhcpLease, map[string]probe.WirelessClient) {
 		} else {
 			ip = ""
 		}
-		leases = append(leases, probe.DhcpLease{MAC: mac, IP: ip, Hostname: text(record, "hostname", "name")})
+		leases = append(leases, probe.DhcpLease{
+			MAC: mac, IP: ip, Hostname: text(record, "hostname", "name"), ClientID: text(record, "duid"),
+		})
 		wireless := object(record["wireless"])
 		band := parseBand(text(wireless, "band"))
 		signal := signedNumber(wireless, "rssi0", "signal", "signalstrength")
@@ -341,6 +377,33 @@ func parseHosts(v any) ([]probe.DhcpLease, map[string]probe.WirelessClient) {
 	return leases, clients
 }
 
+func parseOwnBSSIDs(v any) []probe.OwnBSSID {
+	responses, ok := v.([]wirelessAPIResponse)
+	if !ok {
+		return nil
+	}
+	var out []probe.OwnBSSID
+	for _, response := range responses {
+		keys := make([]string, 0, len(response.Wireless.SSID))
+		for key := range response.Wireless.SSID {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			ssid := response.Wireless.SSID[key]
+			if !isActive(ssid.Enable) {
+				continue
+			}
+			bssid := normalizeMAC(ssid.BSSID)
+			if _, err := net.ParseMAC(bssid); err != nil {
+				continue
+			}
+			out = append(out, probe.OwnBSSID{BSSID: strings.ToUpper(bssid)})
+		}
+	}
+	return out
+}
+
 func isActive(value any) bool {
 	if active, ok := value.(bool); ok {
 		return active
@@ -351,6 +414,9 @@ func isActive(value any) bool {
 func parsePorts(lan, stats any) []probe.EthPort {
 	switchData := object(find(lan, "switch"))
 	rawPorts, _ := switchData["ports"].([]any)
+	if rawPorts == nil {
+		rawPorts, _ = switchData["Fs"].([]any)
+	}
 	statsRoot := object(find(stats, "stats"))
 	rawStats, _ := statsRoot["port"].([]any)
 	rates := make(map[int]probe.EthPort, len(rawStats))
@@ -385,7 +451,7 @@ func parsePorts(lan, stats any) []probe.EthPort {
 	return out
 }
 
-func parseWAN(v any) (string, []string) {
+func parseWAN(v any) probe.WanInfo {
 	var ipv4, ipv6 string
 	walk(v, func(key string, value any) {
 		name := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
@@ -430,7 +496,7 @@ func parseWAN(v any) (string, []string) {
 			dns = append(dns, parsed.String())
 		}
 	}
-	return ip, dns
+	return probe.WanInfo{IP: ip, Gateway: text(info, "gateway"), DNS: dns}
 }
 
 func parseWANRates(v any, previous *wanSample, now time.Time) (*float64, *float64) {

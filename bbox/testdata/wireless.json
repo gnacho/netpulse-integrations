@@ -1,0 +1,1 @@
+[{"wireless":{"ssid":{"24":{"bssid":"02:00:00:00:01:24","enable":1,"security":{"passphrase":"TEST_WIFI_SECRET_NOT_FOR_EXPORT"}},"5":{"bssid":"02:00:00:00:01:05","enable":1,"security":{"passphrase":"TEST_WIFI_SECRET_NOT_FOR_EXPORT"}},"guest":{"bssid":"02:00:00:00:01:99","enable":0,"security":{"passphrase":"TEST_WIFI_SECRET_NOT_FOR_EXPORT"}}}}}]

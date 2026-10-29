@@ -10,9 +10,21 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 
 | Directory | Transport | Coverage |
 |---|---|---|
-| `routeros/` | RouterOS binary API, REST fallback | System, ports, DHCP, ARP, FDB, temperature, firmware state, flash and WAN rates |
+| `routeros/` | RouterOS binary API on port 8728, REST fallback | RouterOS 7+: system, Ethernet ports, DHCP, ARP, bridge FDB, temperature, flash, firmware state and WAN rates |
 | `bbox/` | Bbox local HTTPS API | System, WAN, active hosts and Ethernet port rates |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
+
+All integrations are read-only: they read router data and do not change
+configuration or install or upgrade firmware.
+
+## Why a separate repository
+
+- **Different lifecycles.** Router integrations follow vendor firmware releases,
+  not NetPulse releases.
+- **Isolated credentials.** Router passwords and API tokens stay inside the
+  integration config, never in the NetPulse server.
+- **Hardware-specific ownership.** Each integration has its own maintainer,
+  who can validate it on supported hardware.
 
 ## Install
 
@@ -31,7 +43,13 @@ config readable only by the service account; it contains passwords and agent
 tokens. Install the shared unit from
 [`deploy/netpulse-integrations.service`](deploy/netpulse-integrations.service).
 
-The ingest contract, authentication, payload semantics and contribution rules are in the NetPulse guide:
+The supervisor accepts multiple vendor entries in one JSON config. Each
+integration keeps its own directory, poller and documentation while sharing
+the process, service unit and update path.
+
+Every push is a signed HTTP request to `POST /api/ingest/agent`. The ingest
+contract, authentication, payload semantics and contribution rules are in the
+NetPulse guide:
 
 https://github.com/gnacho/netpulse/blob/main/docs/external-integrations.md
 
@@ -45,7 +63,12 @@ go vet ./...
 go test ./...
 ```
 
-CI runs the same checks, race-enabled tests and static builds for every pull request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and publish a static Linux binary tarball with its SHA-256 file. RouterOS releases currently target amd64 and Asuswrt releases target ARM64.
+CI runs the same checks, race-enabled tests and static builds for every pull
+request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and
+publish a static Linux binary tarball with its SHA-256 file. RouterOS releases
+currently target amd64 and Asuswrt releases target ARM64. Tags for integrations
+running under the supervisor publish the supervisor binary for amd64 and
+arm64.
 
 ## Adding an integration
 
@@ -57,6 +80,12 @@ CI runs the same checks, race-enabled tests and static builds for every pull req
 6. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
+
+## Links
+
+- NetPulse dashboard: https://netpulse.cloudless.club/
+- NetPulse source: https://github.com/gnacho/netpulse
+- Live demo: https://demo.netpulse.cloudless.club/
 
 ## License
 

@@ -1,30 +1,47 @@
 # netpulse-integrations
 
-External agents for router families that do not belong in the NetPulse core.
+External agents that bring vendor routers into [NetPulse](https://netpulse.cloudless.club/), the self-hosted dashboard for home networks. Today that means MikroTik RouterOS and Asus routers running Asuswrt or Asuswrt-Merlin.
 
-NetPulse supports two router sources in its own code: the native OpenWrt agent and generic SNMP. Vendor APIs, credentials and firmware quirks live here instead, one directory per family. Each integration runs as its own process and sends signed data to `POST /api/ingest/agent`.
+NetPulse speaks two router sources natively: its own OpenWrt agent and generic SNMP. Vendor APIs, credentials and firmware quirks live here instead, one directory per family. Every integration is a small static Go binary that polls one router family and pushes a signed snapshot to `POST /api/ingest/agent`.
 
 This keeps the NetPulse server small and avoids shipping code for hardware the core maintainers cannot test. An integration can be released on its own schedule without forcing every NetPulse user to carry it.
 
-## Integrations
+## Supported routers
 
-| Directory | Transport | Coverage |
-|---|---|---|
-| `routeros/` | RouterOS binary API, REST fallback | System, ports, DHCP, ARP, FDB, temperature, firmware state, flash and WAN rates |
-| `asuswrt/` | Portable probes on Asuswrt/Merlin | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
+| Router family | Directory | How it talks to the router | Data |
+|---|---|---|---|
+| MikroTik RouterOS 7 and newer, including RouterBOARD, CCR, CRS, hAP and Chateau devices | `routeros/` | RouterOS binary API on port 8728, REST API as fallback | System identity and resources, Ethernet ports, DHCP leases, ARP, bridge FDB, temperature, flash, firmware update state and WAN rates |
+| Asus routers running Asuswrt or Asuswrt-Merlin | `asuswrt/` | The portable NetPulse probes that run on the router itself | System, wireless radios and clients, DHCP, ARP, FDB, LLDP neighbors, bridge ports and WAN data exposed by the firmware |
+
+Both integrations are read-only. They read counters and tables, and they never change router configuration, install firmware or upgrade a device.
+
+## Why a separate repository
+
+- **Different lifecycles.** A router integration follows firmware releases, not NetPulse releases. RouterOS 7, RouterOS 6 and a Merlin build never move at the same pace.
+- **Isolated credentials.** Router passwords and API tokens stay inside the integration directory, never in the server.
+- **Honest scope.** The core promises what its maintainers can test on their own hardware. An integration documents exactly what its own maintainer validated on a real MikroTik or Asus device.
 
 ## Install
 
-Build the agent you need. The binaries are static Go programs and do not require Docker.
+The binaries are static Go programs. Docker is not required.
 
 ```sh
 CGO_ENABLED=0 go build -o routeros-pusher ./routeros/cmd/routeros-pusher
 CGO_ENABLED=0 go build -o asuswrt-pusher ./asuswrt/cmd/asuswrt-pusher
 ```
 
-Create an external router in NetPulse, obtain its agent token and run the pusher with its environment variables. Each integration README documents the variables, service or boot setup, upgrades and collected data.
+Create an external router in NetPulse, obtain its agent token and run the pusher with its environment variables. Each integration README documents the variables, the service or boot setup, upgrades and collected data:
 
-The ingest contract, authentication, payload semantics and contribution rules are in the NetPulse guide:
+- [`routeros/README.md`](routeros/README.md)
+- [`asuswrt/README.md`](asuswrt/README.md)
+
+Integrations that run on a separate machine can also share one supervisor process, `netpulse-integrations`. It reads a JSON configuration with one entry per router and runs every poller in the same binary.
+
+## How the data reaches NetPulse
+
+Every push is a signed HTTP request: an HMAC-SHA256 signature of the body in `X-Agent-Signature` and the agent token as a bearer credential, sent to `POST /api/ingest/agent`. The payload marks the router as an `external` beacon with its own poll interval, so it appears in the fleet next to the OpenWrt agents with health, devices, ports and topology derived from the same tables.
+
+The contract, its authentication rules, the payload semantics and the contribution rules are documented in the NetPulse repository:
 
 https://github.com/gnacho/netpulse/blob/main/docs/external-integrations.md
 
@@ -52,6 +69,12 @@ Integrations that run inside the shared supervisor are released with their own t
 6. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
+
+## Links
+
+- NetPulse, the dashboard these integrations feed: https://netpulse.cloudless.club/
+- NetPulse source code: https://github.com/gnacho/netpulse
+- Live demo: https://demo.netpulse.cloudless.club/
 
 ## License
 

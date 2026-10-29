@@ -1,5 +1,6 @@
 {
   "server": "https://netpulse.example:3000",
+  "ca_file": "/etc/netpulse-integrations/netpulse-ca.pem",
   "timeout": "15s",
   "integrations": [
     {

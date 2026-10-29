@@ -1,0 +1,1 @@
+[{"hosts":{"list":[{"id":43,"active":1,"hostname":"sample-active","ipaddress":"192.0.2.69","macaddress":"02:00:00:00:00:10","wireless":{"band":5,"rssi0":"-45"}},{"id":2,"active":0,"hostname":"sample-inactive","ipaddress":"192.0.2.150","macaddress":"02:00:00:00:00:11","wireless":{"band":"5","rssi0":"-64"}}]}}]

@@ -46,6 +46,12 @@ router slug, agent token, Bbox address, and administrator password. The
 supervisor config can include other vendor entries in the same
 `integrations` array.
 
+`ca_file` is optional. Set it to a PEM CA certificate file when the NetPulse
+HTTPS server uses a private CA that is not already trusted by the host; the
+certificate is added to the system trust roots. Omit it when the server's
+certificate is already trusted. `timeout` sets the NetPulse push timeout and
+defaults to 15 seconds.
+
 The `host` may also be the Bbox LAN IP. For a local self-signed certificate,
 set `insecure` to `true` only when needed. Restrict the config file to the
 service account (`chmod 600`); it contains both credentials. Credentials and

@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,7 +24,7 @@ type Client struct {
 	http   *http.Client
 }
 
-func NewClient(server string, timeout time.Duration) (*Client, error) {
+func NewClient(server string, timeout time.Duration, caFile string) (*Client, error) {
 	server = strings.TrimRight(strings.TrimSpace(server), "/")
 	if server == "" {
 		return nil, fmt.Errorf("NetPulse server URL is required")
@@ -29,7 +32,31 @@ func NewClient(server string, timeout time.Duration) (*Client, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	return &Client{server: server, http: &http.Client{Timeout: timeout}}, nil
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("default HTTP transport has unexpected type %T", http.DefaultTransport)
+	}
+	transport = transport.Clone()
+	if strings.TrimSpace(caFile) != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read NetPulse CA file: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("NetPulse CA file contains no valid certificates")
+		}
+		tlsConfig := &tls.Config{RootCAs: roots}
+		if transport.TLSClientConfig != nil {
+			tlsConfig = transport.TLSClientConfig.Clone()
+			tlsConfig.RootCAs = roots
+		}
+		transport.TLSClientConfig = tlsConfig
+	}
+	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport}}, nil
 }
 
 // Send marshals once, then signs and sends those exact bytes.

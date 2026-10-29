@@ -24,6 +24,7 @@ var version = "dev"
 
 type fileConfig struct {
 	Server       string        `json:"server"`
+	CAFile       string        `json:"ca_file,omitempty"`
 	Timeout      string        `json:"timeout,omitempty"`
 	Integrations []integration `json:"integrations"`
 }
@@ -73,12 +74,21 @@ func run(path string, logger *slog.Logger) error {
 			return errors.New("timeout must be a positive Go duration")
 		}
 	}
-	client, err := push.NewClient(cfg.Server, pushTimeout)
+	client, err := push.NewClient(cfg.Server, pushTimeout, cfg.CAFile)
 	if err != nil {
 		return err
 	}
 	pollers := make([]supervisor.Poller, 0, len(cfg.Integrations))
+	seenSlugs := make(map[string]struct{}, len(cfg.Integrations))
 	for i, entry := range cfg.Integrations {
+		slug := strings.TrimSpace(entry.Slug)
+		if slug == "" {
+			return fmt.Errorf("integration %d: slug is required", i)
+		}
+		if _, exists := seenSlugs[slug]; exists {
+			return fmt.Errorf("integration %d: duplicate slug %q", i, slug)
+		}
+		seenSlugs[slug] = struct{}{}
 		interval := 60 * time.Second
 		if entry.Interval != "" {
 			interval, err = time.ParseDuration(entry.Interval)
@@ -90,7 +100,7 @@ func run(path string, logger *slog.Logger) error {
 		if entryVersion == "" {
 			entryVersion = version
 		}
-		item := supervisor.Poller{Vendor: strings.ToLower(entry.Type), Slug: entry.Slug, Token: entry.Token,
+		item := supervisor.Poller{Vendor: strings.ToLower(entry.Type), Slug: slug, Token: entry.Token,
 			Version: entryVersion, Interval: interval}
 		switch item.Vendor {
 		case "bbox":

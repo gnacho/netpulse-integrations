@@ -314,7 +314,7 @@ func parseHosts(v any) ([]probe.DhcpLease, map[string]probe.WirelessClient) {
 		if record == nil {
 			continue
 		}
-		if active, ok := record["active"]; ok && number(map[string]any{"active": active}, "active") != 1 {
+		if active, ok := record["active"]; ok && !isActive(active) {
 			continue
 		}
 		mac := normalizeMAC(text(record, "macaddress", "mac"))
@@ -339,6 +339,13 @@ func parseHosts(v any) ([]probe.DhcpLease, map[string]probe.WirelessClient) {
 		}
 	}
 	return leases, clients
+}
+
+func isActive(value any) bool {
+	if active, ok := value.(bool); ok {
+		return active
+	}
+	return number(map[string]any{"active": value}, "active") == 1
 }
 
 func parsePorts(lan, stats any) []probe.EthPort {

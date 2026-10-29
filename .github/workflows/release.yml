@@ -5,6 +5,7 @@ on:
     tags:
       - 'routeros/v*'
       - 'asuswrt/v*'
+      - 'bbox/v*'
 
 permissions:
   contents: write
@@ -39,11 +40,24 @@ jobs:
           case "$TAG" in
             routeros/v*)
               name=routeros
-              arch=amd64
+              binary=routeros-pusher
+              target=./routeros/cmd/routeros-pusher
+              ldvar=main.Version
+              arches=amd64
               ;;
             asuswrt/v*)
               name=asuswrt
-              arch=arm64
+              binary=asuswrt-pusher
+              target=./asuswrt/cmd/asuswrt-pusher
+              ldvar=main.Version
+              arches=arm64
+              ;;
+            bbox/v*)
+              name=integrations-supervisor
+              binary=netpulse-integrations
+              target=./cmd/integrations-supervisor
+              ldvar=main.version
+              arches="amd64 arm64"
               ;;
             *)
               echo "Unsupported tag: $TAG" >&2
@@ -57,39 +71,61 @@ jobs:
           fi
           {
             echo "name=$name"
-            echo "arch=$arch"
+            echo "binary=$binary"
+            echo "target=$target"
+            echo "ldvar=$ldvar"
+            echo "arches=$arches"
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
-      - name: Build static pusher
+      - name: Build static binaries
         env:
           CGO_ENABLED: 0
           GOOS: linux
-          GOARCH: ${{ steps.integration.outputs.arch }}
-          VERSION: ${{ steps.integration.outputs.version }}
-          NAME: ${{ steps.integration.outputs.name }}
-        run: |
-          mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.Version=$VERSION" \
-            -o "dist/$NAME-pusher" "./$NAME/cmd/$NAME-pusher"
-      - name: Package release
-        env:
-          NAME: ${{ steps.integration.outputs.name }}
-          ARCH: ${{ steps.integration.outputs.arch }}
+          BINARY: ${{ steps.integration.outputs.binary }}
+          TARGET: ${{ steps.integration.outputs.target }}
+          LDVAR: ${{ steps.integration.outputs.ldvar }}
+          ARCHES: ${{ steps.integration.outputs.arches }}
           VERSION: ${{ steps.integration.outputs.version }}
         run: |
           set -eu
-          cd dist
-          asset="${NAME}_${VERSION}_linux_${ARCH}.tar.gz"
-          tar -czf "$asset" "$NAME-pusher"
-          sha256sum "$asset" > "$asset.sha256"
+          mkdir -p dist
+          for arch in $ARCHES; do
+            GOARCH=$arch go build -trimpath -ldflags "-s -w -X $LDVAR=$VERSION" \
+              -o "dist/$BINARY-$arch" "$TARGET"
+            if ! grep -aqF "$VERSION" "dist/$BINARY-$arch"; then
+              echo "version $VERSION is not embedded in $BINARY-$arch" >&2
+              exit 1
+            fi
+          done
+      - name: Package release
+        env:
+          NAME: ${{ steps.integration.outputs.name }}
+          BINARY: ${{ steps.integration.outputs.binary }}
+          ARCHES: ${{ steps.integration.outputs.arches }}
+          VERSION: ${{ steps.integration.outputs.version }}
+        run: |
+          set -eu
+          mkdir -p stage
+          for arch in $ARCHES; do
+            cp "dist/$BINARY-$arch" "stage/$BINARY"
+            asset="${NAME}_${VERSION}_linux_${arch}.tar.gz"
+            tar -czf "dist/$asset" -C stage "$BINARY"
+            rm -f "stage/$BINARY"
+            ( cd dist && sha256sum "$asset" > "$asset.sha256" )
+          done
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           NAME: ${{ steps.integration.outputs.name }}
-          ARCH: ${{ steps.integration.outputs.arch }}
+          ARCHES: ${{ steps.integration.outputs.arches }}
           VERSION: ${{ steps.integration.outputs.version }}
         run: |
-          asset="${NAME}_${VERSION}_linux_${ARCH}.tar.gz"
-          gh release create "$TAG" "dist/$asset" "dist/$asset.sha256" \
+          set -eu
+          assets=()
+          for arch in $ARCHES; do
+            asset="dist/${NAME}_${VERSION}_linux_${arch}.tar.gz"
+            assets+=("$asset" "$asset.sha256")
+          done
+          gh release create "$TAG" "${assets[@]}" \
             --title "$TAG" --generate-notes

@@ -38,7 +38,9 @@ go vet ./...
 go test ./...
 ```
 
-CI runs the same checks, race-enabled tests and static builds for every pull request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and publish a static Linux binary tarball with its SHA-256 file. RouterOS releases currently target amd64 and Asuswrt releases target ARM64.
+CI runs the same checks, race-enabled tests, a full `go build ./...` and static cross-builds for every pull request. Tags such as `routeros/v0.1.0` and `asuswrt/v0.1.0` run the tests and publish a static Linux binary tarball with its SHA-256 file. RouterOS releases currently target amd64 and Asuswrt releases target ARM64.
+
+Integrations that run inside the shared supervisor are released with their own tag as well. That tag publishes the supervisor binary (`netpulse-integrations`) for amd64 and arm64, one tarball per architecture with its SHA-256 file.
 
 ## Adding an integration
 

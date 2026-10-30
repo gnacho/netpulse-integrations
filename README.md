@@ -18,6 +18,25 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 All integrations are read-only: they read router data and do not change
 configuration or install or upgrade firmware.
 
+## Vendor catalog
+
+[`vendors.json`](vendors.json) is the machine-readable catalog NetPulse core
+fetches to discover integrations, so adding a vendor never requires a NetPulse
+release. It holds one entry per vendor directory and CI keeps it in sync with
+the repository: `.github/validate_vendors.py` (stdlib only) runs on every push
+and pull request and fails on drift between the catalog, the vendor
+directories and the release workflow.
+
+| Field | Meaning |
+|---|---|
+| `id` | Vendor directory name: lowercase, unique, entries sorted by it |
+| `mode` | How NetPulse runs the agent: `local` (managed child on the NetPulse host) or `ssh` (installed on the router itself) |
+| `arches` | Linux architectures the release workflow builds for this vendor |
+| `tagPrefix` | Release tag prefix, `<id>/v`; the workflow listens on `<tagPrefix>*` tags |
+| `binary` | Name of the published binary for this vendor |
+| `target` | Go build target directory (`<target>/main.go`) compiled for the tag |
+| `description` | One-line summary shown by NetPulse |
+
 ## Why a separate repository
 
 - **Different lifecycles.** Router integrations follow vendor firmware releases,
@@ -78,7 +97,8 @@ arm64.
 3. Add a poller constructor to the shared supervisor. Keep vendor credentials and parsing inside that directory. Ask NetPulse maintainers for neutral contract fields before depending on them.
 4. Include fixtures, tests and evidence from real hardware.
 5. Add a `CODEOWNERS` entry for the directory. The owner of the hardware maintains it and validates releases.
-6. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
+6. Add an entry to [`vendors.json`](vendors.json) with the release values and a short description. CI validates the catalog against the release workflow and fails on drift.
+7. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
 

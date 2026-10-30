@@ -1,0 +1,1 @@
+[{"wan":{"internet":{"state":2},"interface":{"id":4,"default":0,"state":1},"ip":{"address":"203.0.113.8","gateway":"203.0.113.1","dnsservers":"1.1.1.1,8.8.8.8","dnsserversv6":"2001:db8::1"}}}]

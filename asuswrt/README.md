@@ -4,6 +4,23 @@ External read-only agent for Asuswrt and Asuswrt-Merlin. It runs the portable Ne
 
 The binary can live in `/jffs`, so it survives firmware updates. It does not require `ubus`, Docker or the native OpenWrt agent runtime.
 
+The same collector can also run as an `asuswrt` entry in the shared
+integrations supervisor. Because it uses local shell probes, run that
+supervisor on the Asuswrt/Merlin router. Example entry:
+
+```json
+{
+  "type": "asuswrt",
+  "slug": "asus-main",
+  "token": "REPLACE_WITH_AGENT_TOKEN",
+  "interval": "30s"
+}
+```
+
+Add the entry to the supervisor config's `integrations` array. This can share
+one process and service with network-polling integrations such as BBox, as
+long as the supervisor host is the Asuswrt router.
+
 ## Coverage
 
 The pusher uses the same portable probes as the native agent and preserves their nil and empty-section semantics. Available data depends on the firmware and installed tools:
@@ -40,7 +57,7 @@ Create `/jffs/netpulse-asuswrt.env` with permissions restricted to root:
 | `NETPULSE_SERVER` | yes | NetPulse base URL, for example `https://netpulse.example:3000` |
 | `NETPULSE_TOKEN` | yes | Agent token for the external router |
 | `NETPULSE_SLUG` | yes | Router slug in NetPulse |
-| `NETPULSE_SERVER_FP` | https | SHA-256 of the server's SPKI, lowercase hex. Required whenever `NETPULSE_SERVER` is https; comma-separated to pin more than one key |
+| `NETPULSE_SERVER_FP` | if https | SHA-256 of the server's SPKI, lowercase hex. Required whenever `NETPULSE_SERVER` is https; comma-separated to pin more than one key |
 | `NETPULSE_INTERVAL` | no | Poll interval as a Go duration, default `30s` |
 
 The token is a secret. Keep it out of the repository, tickets, logs and shell history.

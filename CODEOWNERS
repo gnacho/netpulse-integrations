@@ -5,5 +5,4 @@
 /routeros/ @gnacho
 /asuswrt/ @gnacho
 
-# Add new integrations here when their maintainer accepts ownership.
-# /bbox/ @juflo
+/bbox/ @juflo

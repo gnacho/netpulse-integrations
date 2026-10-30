@@ -1,0 +1,21 @@
+[Unit]
+Description=NetPulse external integrations supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netpulse
+Group=netpulse
+Environment=NETPULSE_INTEGRATIONS_CONFIG=/etc/netpulse-integrations/config.json
+ExecStart=/usr/local/bin/netpulse-integrations
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/netpulse-integrations
+
+[Install]
+WantedBy=multi-user.target

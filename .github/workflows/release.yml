@@ -6,6 +6,7 @@ on:
       - 'routeros/v*'
       - 'asuswrt/v*'
       - 'bbox/v*'
+      - 'unifi/v*'
 
 permissions:
   contents: write
@@ -58,6 +59,13 @@ jobs:
               target=./cmd/integrations-supervisor
               ldvar=main.version
               arches="amd64 arm64"
+              ;;
+            unifi/v*)
+              name=unifi
+              binary=unifi-pusher
+              target=./unifi/cmd/unifi-pusher
+              ldvar=main.Version
+              arches=amd64
               ;;
             *)
               echo "Unsupported tag: $TAG" >&2

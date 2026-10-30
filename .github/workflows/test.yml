@@ -37,3 +37,4 @@ jobs:
         run: |
           GOARCH=amd64 go build -trimpath -o /tmp/routeros-pusher ./routeros/cmd/routeros-pusher
           GOARCH=arm64 go build -trimpath -o /tmp/asuswrt-pusher ./asuswrt/cmd/asuswrt-pusher
+          GOARCH=amd64 go build -trimpath -o /tmp/unifi-pusher ./unifi/cmd/unifi-pusher

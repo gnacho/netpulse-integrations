@@ -6,12 +6,15 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +30,7 @@ type Config struct {
 	Slug       string
 	Version    string
 	Interval   time.Duration
+	ServerFP   string
 	HTTPClient *http.Client
 }
 
@@ -66,6 +70,11 @@ func ConfigFromEnv(name, version string) (Config, error) {
 			return Config{}, fmt.Errorf("NETPULSE_INTERVAL must be positive")
 		}
 	}
+	fp := strings.TrimSpace(os.Getenv("NETPULSE_SERVER_FP"))
+	client, err := buildHTTPClient(server, fp)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Name:       name,
 		Server:     strings.TrimRight(server, "/"),
@@ -73,8 +82,73 @@ func ConfigFromEnv(name, version string) (Config, error) {
 		Slug:       slug,
 		Version:    version,
 		Interval:   interval,
-		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		ServerFP:   fp,
+		HTTPClient: client,
 	}, nil
+}
+
+// buildHTTPClient returns a client that validates an HTTPS NetPulse server by
+// SPKI pinning NETPULSE_SERVER_FP, mirroring the native agent. A self-signed
+// NetPulse certificate is valid only for 127.0.0.1, so normal x509 hostname
+// verification against the LAN address always fails; pinning the server's
+// public key is what makes ingestion work without InsecureSkipVerify. Plain
+// HTTP needs no pin. An HTTPS server with no pin fails closed rather than
+// silently skipping verification.
+func buildHTTPClient(server, fp string) (*http.Client, error) {
+	base := &http.Client{Timeout: 10 * time.Second}
+	if !strings.HasPrefix(server, "https://") {
+		return base, nil
+	}
+	pins, err := parsePins(fp)
+	if err != nil {
+		return nil, err
+	}
+	if len(pins) == 0 {
+		return nil, fmt.Errorf("HTTPS requires NETPULSE_SERVER_FP (SHA-256 SPKI pin); omit it only for plain HTTP")
+	}
+	u, err := url.Parse(server)
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("invalid NETPULSE_SERVER %q", server)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			return verifySPKI(cs.PeerCertificates, pins)
+		},
+		MinVersion: tls.VersionTLS12,
+	}
+	base.Transport = transport
+	return base, nil
+}
+
+func parsePins(fp string) ([]string, error) {
+	var pins []string
+	for _, p := range strings.Split(strings.ToLower(strings.TrimSpace(fp)), ",") {
+		if p == "" {
+			continue
+		}
+		b, err := hex.DecodeString(p)
+		if err != nil || len(b) != sha256.Size {
+			return nil, fmt.Errorf("NETPULSE_SERVER_FP %q is not a SHA-256 fingerprint (64 hex chars)", p)
+		}
+		pins = append(pins, p)
+	}
+	return pins, nil
+}
+
+func verifySPKI(chain []*x509.Certificate, pins []string) error {
+	if len(chain) == 0 {
+		return fmt.Errorf("no peer certificates")
+	}
+	sum := sha256.Sum256(chain[0].RawSubjectPublicKeyInfo)
+	got := hex.EncodeToString(sum[:])
+	for _, p := range pins {
+		if p == got {
+			return nil
+		}
+	}
+	return fmt.Errorf("SPKI mismatch: the server's key %s matches no pinned key", got)
 }
 
 // FromData adapts a collector that returns only vendor-specific payload data.

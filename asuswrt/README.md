@@ -40,9 +40,19 @@ Create `/jffs/netpulse-asuswrt.env` with permissions restricted to root:
 | `NETPULSE_SERVER` | yes | NetPulse base URL, for example `https://netpulse.example:3000` |
 | `NETPULSE_TOKEN` | yes | Agent token for the external router |
 | `NETPULSE_SLUG` | yes | Router slug in NetPulse |
+| `NETPULSE_SERVER_FP` | https | SHA-256 of the server's SPKI, lowercase hex. Required whenever `NETPULSE_SERVER` is https; comma-separated to pin more than one key |
 | `NETPULSE_INTERVAL` | no | Poll interval as a Go duration, default `30s` |
 
 The token is a secret. Keep it out of the repository, tickets, logs and shell history.
+
+An https NetPulse is validated by pinning the server's public key, the same way the native agent does it, because the certificate NetPulse generates is self-signed and issued for `127.0.0.1`: verifying it against a LAN address can never pass, and skipping verification would throw away the only protection the token alone does not give you. Derive the pin from the server:
+
+```sh
+openssl s_client -connect <host>:<port> </dev/null 2>/dev/null \
+  | openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum
+```
+
+The value survives a certificate renewal as long as the key pair does not change. `POST /api/agents` prints it in the `install` line of its response, and plain `http://` needs no pin.
 
 ## Run at boot
 

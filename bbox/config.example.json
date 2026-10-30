@@ -1,6 +1,6 @@
 {
   "server": "https://netpulse.example:3000",
-  "ca_file": "/etc/netpulse-integrations/netpulse-ca.pem",
+  "server_fp": "REPLACE_WITH_NETPULSE_SERVER_SPKI_SHA256",
   "timeout": "15s",
   "integrations": [
     {

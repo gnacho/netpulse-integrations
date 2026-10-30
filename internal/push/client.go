@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -39,20 +40,24 @@ func NewClient(server string, timeout time.Duration, caFile, serverFP string) (*
 	if server == "" {
 		return nil, fmt.Errorf("NetPulse server URL is required")
 	}
+	u, err := url.Parse(server)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, fmt.Errorf("invalid NetPulse server URL %q", server)
+	}
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 	caFile = strings.TrimSpace(caFile)
 	serverFP = strings.TrimSpace(serverFP)
 	if caFile != "" && serverFP != "" {
-		return nil, errors.New("ca_file and server_fp are mutually exclusive: a pin is the option that works with the NetPulse generated certificate")
+		return nil, errors.New("ca_file and server_fp are mutually exclusive")
 	}
 	var pins []string
 	if serverFP != "" {
 		var err error
 		pins, err = tlspin.Parse(serverFP)
 		if err != nil {
-			return nil, fmt.Errorf("server_fp: %w", err)
+			return nil, fmt.Errorf("invalid server fingerprint: %w", err)
 		}
 	}
 	transport, ok := http.DefaultTransport.(*http.Transport)
@@ -61,7 +66,7 @@ func NewClient(server string, timeout time.Duration, caFile, serverFP string) (*
 	}
 	transport = transport.Clone()
 	switch {
-	case caFile != "":
+	case caFile != "" && u.Scheme == "https":
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			return nil, fmt.Errorf("read NetPulse CA file: %w", err)
@@ -83,14 +88,14 @@ func NewClient(server string, timeout time.Duration, caFile, serverFP string) (*
 		transport.TLSClientConfig = &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
 			VerifyConnection: func(cs tls.ConnectionState) error {
-				return tlspin.Verify(cs.PeerCertificates, pins)
+				return tlspin.Verify(cs.PeerCertificates, pins, u.Hostname())
 			},
 			MinVersion: tls.VersionTLS12,
 		}
 	case strings.HasPrefix(server, "https://"):
-		return nil, errors.New("HTTPS requires server_fp (SHA-256 SPKI pin) or ca_file; omit both only for plain HTTP")
+		return nil, errors.New("HTTPS requires server_fp or ca_file for server authentication")
 	}
-	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport}}, nil
+	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 // Send marshals once, then signs and sends those exact bytes.

@@ -77,27 +77,23 @@ router slug, agent token, Bbox address, and administrator password. The
 supervisor config can include other vendor entries in the same
 `integrations` array.
 
-`ca_file` and `server_fp` are optional and mutually exclusive; either one
-authenticates the NetPulse HTTPS server. `ca_file` adds a PEM CA certificate
-to the system trust roots, which works when the server certificate carries
-proper SANs. `server_fp` pins the server public key: the SHA-256 of its
-SPKI, lowercase hex, the same value the external pushers accept in
-`NETPULSE_SERVER_FP` (comma-separated to pin more than one key). This is the
-option that works with the NetPulse generated certificate, which is issued
-for `127.0.0.1` and fails host name verification from any LAN address. When
-`server_fp` is empty, the supervisor also reads `NETPULSE_SERVER_FP` from
-its environment, so container setups can inject the pin without rewriting
-the config file. `timeout` sets the NetPulse push timeout and defaults to
-15 seconds.
+For HTTPS, set `server_fp` to the NetPulse server's SHA-256 SPKI fingerprint.
+NetPulse prints it in its startup log and exposes it at `/fingerprint`. This
+pin lets the pusher securely trust NetPulse's self-signed certificate even
+when the URL uses a LAN IP not listed in the certificate. Multiple comma
+separated fingerprints can be configured during key rotation.
 
-An HTTPS `server` with neither `ca_file` nor `server_fp` refuses to start
-instead of failing later with a raw x509 error. Point the supervisor at
-NetPulse over `http` only on a trusted network.
+Alternatively, omit `server_fp` and set `ca_file` to a PEM CA certificate
+when the certificate is signed by a private CA and its DNS/IP name matches
+the URL. `ca_file` does not relax host-name verification. HTTPS requires one
+of these two trust settings. `timeout` sets the NetPulse push timeout and
+defaults to 15 seconds.
 
 The `host` may also be the Bbox LAN IP. For a local self-signed certificate,
-set `insecure` to `true` only when needed. Restrict the config file to the
-service account (`chmod 600`); it contains both credentials. Credentials and
-session cookies are never logged.
+set `insecure` to `true` only when needed; this option applies to the Bbox
+connection, not NetPulse HTTPS. Restrict the config file to the service
+account (`chmod 600`); it contains both credentials. Credentials and session
+cookies are never logged.
 
 If Bbox rejects the login or a re-authenticated session, the pusher stops
 without another login attempt. This avoids repeatedly submitting a bad

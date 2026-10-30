@@ -98,7 +98,7 @@ func TestClientPinsServerSPKI(t *testing.T) {
 
 	t.Run("malformed pin fails at construction", func(t *testing.T) {
 		_, err := NewClient(server.URL, time.Second, "", "not-a-fingerprint")
-		if err == nil || !strings.Contains(err.Error(), "server_fp") {
+		if err == nil || !strings.Contains(err.Error(), "fingerprint") {
 			t.Fatalf("expected server_fp validation error, got %v", err)
 		}
 	})

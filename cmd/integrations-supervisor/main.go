@@ -25,6 +25,7 @@ var version = "dev"
 type fileConfig struct {
 	Server       string        `json:"server"`
 	CAFile       string        `json:"ca_file,omitempty"`
+	ServerFP     string        `json:"server_fp,omitempty"`
 	Timeout      string        `json:"timeout,omitempty"`
 	Integrations []integration `json:"integrations"`
 }
@@ -74,7 +75,9 @@ func run(path string, logger *slog.Logger) error {
 			return errors.New("timeout must be a positive Go duration")
 		}
 	}
-	client, err := push.NewClient(cfg.Server, pushTimeout, cfg.CAFile)
+	client, err := push.NewClient(push.Config{
+		Server: cfg.Server, Timeout: pushTimeout, CAFile: cfg.CAFile, ServerFP: cfg.ServerFP,
+	})
 	if err != nil {
 		return err
 	}

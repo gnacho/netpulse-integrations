@@ -48,10 +48,11 @@ Or run the pusher on its own with these environment variables:
 | `NETPULSE_SERVER` | yes | NetPulse base URL, for example `https://netpulse.example:3000` |
 | `NETPULSE_TOKEN` | yes | Agent token for the external router |
 | `NETPULSE_SLUG` | yes | Router slug in NetPulse |
-| `NETPULSE_SERVER_FP` | if https | SHA-256 of the server's SPKI, lowercase hex. Required whenever `NETPULSE_SERVER` is https; comma-separated to pin more than one key |
+| `NETPULSE_SERVER_FP` | if https | SHA-256 SPKI pin for NetPulse's self-signed certificate or a certificate name mismatch; comma-separated during key rotation |
+| `NETPULSE_CA_FILE` | no | PEM CA bundle for a private CA with a certificate name matching the URL; alternative to `NETPULSE_SERVER_FP` |
 | `NETPULSE_INTERVAL` | no | Poll interval as a Go duration, default `30s` |
 
-An https NetPulse is validated by pinning the server's public key, the same way the native agent does it, because the certificate NetPulse generates is self-signed and issued for `127.0.0.1`: verifying it against a LAN address can never pass. `ROUTEROS_INSECURE` only covers the connection to the router, never the connection to NetPulse. Derive the pin with:
+An https NetPulse is validated by pinning the server's public key, the same way the native agent does it, because the certificate NetPulse generates is self-signed and issued for `127.0.0.1`: verifying it against a LAN address can never pass. Alternatively, use `NETPULSE_CA_FILE` for a private CA when its certificate name matches the URL. These settings are mutually exclusive. `ROUTEROS_INSECURE` only covers the connection to the router, never the connection to NetPulse. Derive the pin with:
 
 ```sh
 openssl s_client -connect <host>:<port> </dev/null 2>/dev/null \

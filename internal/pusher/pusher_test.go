@@ -13,16 +13,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
 func TestConfigFromEnv(t *testing.T) {
-	const pin = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 	t.Setenv("NETPULSE_SERVER", "https://netpulse.example/")
 	t.Setenv("NETPULSE_TOKEN", "secret")
 	t.Setenv("NETPULSE_SLUG", "living-room")
 	t.Setenv("NETPULSE_INTERVAL", "45s")
-	t.Setenv("NETPULSE_SERVER_FP", pin)
+	t.Setenv("NETPULSE_SERVER_FP", strings.Repeat("01", 32))
+	t.Setenv("NETPULSE_CA_FILE", "")
 	cfg, err := ConfigFromEnv("test-pusher", "1.2.3")
 	if err != nil {
 		t.Fatalf("ConfigFromEnv: %v", err)
@@ -33,78 +34,25 @@ func TestConfigFromEnv(t *testing.T) {
 	if cfg.Interval != 45*time.Second || cfg.Name != "test-pusher" || cfg.Version != "1.2.3" {
 		t.Fatalf("unexpected runtime config: %+v", cfg)
 	}
-	if cfg.ServerFP != pin {
-		t.Fatalf("ServerFP = %q, want %q", cfg.ServerFP, pin)
-	}
-	if cfg.HTTPClient == nil || cfg.HTTPClient.Transport == nil {
-		t.Fatal("https config must carry a pinned transport")
+	if cfg.PushClient == nil {
+		t.Fatal("ConfigFromEnv did not construct the shared push client")
 	}
 }
 
-func TestConfigFromEnvHttpsRequiresPin(t *testing.T) {
+func TestConfigFromEnvRejectsHTTPSWithoutConfiguredTrust(t *testing.T) {
 	t.Setenv("NETPULSE_SERVER", "https://netpulse.example")
 	t.Setenv("NETPULSE_TOKEN", "secret")
 	t.Setenv("NETPULSE_SLUG", "router")
 	t.Setenv("NETPULSE_SERVER_FP", "")
-	if _, err := ConfigFromEnv("test", "1"); err == nil || !strings.Contains(err.Error(), "NETPULSE_SERVER_FP") {
-		t.Fatalf("https without a pin must fail closed, got %v", err)
+	t.Setenv("NETPULSE_CA_FILE", "")
+	if _, err := ConfigFromEnv("test", "1"); err == nil || !strings.Contains(err.Error(), "HTTPS requires") {
+		t.Fatalf("https without pin or CA must fail closed, got %v", err)
 	}
-	// Plain HTTP has no certificate to pin.
 	t.Setenv("NETPULSE_SERVER", "http://netpulse.example")
+	t.Setenv("NETPULSE_CA_FILE", "unused-on-http.pem")
 	if _, err := ConfigFromEnv("test", "1"); err != nil {
-		t.Fatalf("http without a pin should be accepted: %v", err)
+		t.Fatalf("plain HTTP should ignore TLS-only trust settings: %v", err)
 	}
-	// A pin that cannot be a SHA-256 is a typo, not an impostor server.
-	t.Setenv("NETPULSE_SERVER", "https://netpulse.example")
-	t.Setenv("NETPULSE_SERVER_FP", "not-a-fingerprint")
-	if _, err := ConfigFromEnv("test", "1"); err == nil || !strings.Contains(err.Error(), "NETPULSE_SERVER_FP") {
-		t.Fatalf("malformed pin must be reported against NETPULSE_SERVER_FP, got %v", err)
-	}
-}
-
-// A self-signed NetPulse certificate is issued for 127.0.0.1, so hostname
-// verification against the LAN address can never pass. Pinning the server's
-// public key is what makes ingestion work, and a wrong pin must still fail.
-func TestPushWithSPKIPin(t *testing.T) {
-	var hits int
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer server.Close()
-
-	sum := sha256.Sum256(server.Certificate().RawSubjectPublicKeyInfo)
-	pin := hex.EncodeToString(sum[:])
-	payload := &probe.Payload{Router: "router", Kind: "external", Ts: 1, Interval: 30}
-
-	t.Run("pinned", func(t *testing.T) {
-		client, err := buildHTTPClient(server.URL, pin)
-		if err != nil {
-			t.Fatalf("buildHTTPClient: %v", err)
-		}
-		cfg := Config{Server: server.URL, Token: "token", HTTPClient: client}
-		if err := Push(context.Background(), cfg, payload); err != nil {
-			t.Fatalf("Push with the right pin: %v", err)
-		}
-	})
-
-	t.Run("wrong pin rejects before the request", func(t *testing.T) {
-		client, err := buildHTTPClient(server.URL, strings.Repeat("ff", 32))
-		if err != nil {
-			t.Fatalf("buildHTTPClient: %v", err)
-		}
-		cfg := Config{Server: server.URL, Token: "token", HTTPClient: client}
-		err = Push(context.Background(), cfg, payload)
-		if err == nil || !strings.Contains(err.Error(), "SPKI mismatch") {
-			t.Fatalf("expected SPKI mismatch, got %v", err)
-		}
-	})
-
-	t.Run("no pin fails closed", func(t *testing.T) {
-		if _, err := buildHTTPClient(server.URL, ""); err == nil || !strings.Contains(err.Error(), "NETPULSE_SERVER_FP") {
-			t.Fatalf("https without a pin must fail closed, got %v", err)
-		}
-	})
 }
 
 func TestConfigFromEnvRejectsMissingAndInvalidSettings(t *testing.T) {
@@ -155,7 +103,7 @@ func TestPushSignsExactBody(t *testing.T) {
 	defer server.Close()
 
 	payload := &probe.Payload{Router: "router", Kind: "external", Ts: 1, Interval: 30}
-	cfg := Config{Server: server.URL, Token: token, HTTPClient: server.Client()}
+	cfg := Config{Server: server.URL, Token: token, PushClient: testPushClient(t, server.URL)}
 	if err := Push(context.Background(), cfg, payload); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
@@ -170,7 +118,7 @@ func TestPushReportsHTTPErrorWithoutToken(t *testing.T) {
 		http.Error(w, "bad payload", http.StatusBadRequest)
 	}))
 	defer server.Close()
-	cfg := Config{Server: server.URL, Token: "do-not-leak", HTTPClient: server.Client()}
+	cfg := Config{Server: server.URL, Token: "do-not-leak", PushClient: testPushClient(t, server.URL)}
 	err := Push(context.Background(), cfg, &probe.Payload{})
 	if err == nil || !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "bad payload") {
 		t.Fatalf("unexpected error: %v", err)
@@ -199,7 +147,7 @@ func TestRunNormalizesExternalEnvelopeAndStops(t *testing.T) {
 		Slug:       "asus",
 		Version:    "2.0.0",
 		Interval:   time.Minute,
-		HTTPClient: server.Client(),
+		PushClient: testPushClient(t, server.URL),
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -227,6 +175,15 @@ func TestRunNormalizesExternalEnvelopeAndStops(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not stop after cancellation")
 	}
+}
+
+func testPushClient(t *testing.T, server string) *push.Client {
+	t.Helper()
+	client, err := push.NewClient(push.Config{Server: server, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
 }
 
 func TestFromDataRejectsNil(t *testing.T) {

@@ -1,24 +1,15 @@
-// Package pusher provides the shared delivery and polling loop for external integrations.
+// Package pusher provides the standalone polling loop for external integrations.
 package pusher
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -30,8 +21,7 @@ type Config struct {
 	Slug       string
 	Version    string
 	Interval   time.Duration
-	ServerFP   string
-	HTTPClient *http.Client
+	PushClient *push.Client
 }
 
 // CollectFunc obtains a payload from one integration. Run fills the common envelope fields.
@@ -70,8 +60,11 @@ func ConfigFromEnv(name, version string) (Config, error) {
 			return Config{}, fmt.Errorf("NETPULSE_INTERVAL must be positive")
 		}
 	}
-	fp := strings.TrimSpace(os.Getenv("NETPULSE_SERVER_FP"))
-	client, err := buildHTTPClient(server, fp)
+	serverFP := strings.TrimSpace(os.Getenv("NETPULSE_SERVER_FP"))
+	caFile := strings.TrimSpace(os.Getenv("NETPULSE_CA_FILE"))
+	client, err := push.NewClient(push.Config{
+		Server: server, Timeout: 10 * time.Second, CAFile: caFile, ServerFP: serverFP,
+	})
 	if err != nil {
 		return Config{}, err
 	}
@@ -82,73 +75,8 @@ func ConfigFromEnv(name, version string) (Config, error) {
 		Slug:       slug,
 		Version:    version,
 		Interval:   interval,
-		ServerFP:   fp,
-		HTTPClient: client,
+		PushClient: client,
 	}, nil
-}
-
-// buildHTTPClient returns a client that validates an HTTPS NetPulse server by
-// SPKI pinning NETPULSE_SERVER_FP, mirroring the native agent. A self-signed
-// NetPulse certificate is valid only for 127.0.0.1, so normal x509 hostname
-// verification against the LAN address always fails; pinning the server's
-// public key is what makes ingestion work without InsecureSkipVerify. Plain
-// HTTP needs no pin. An HTTPS server with no pin fails closed rather than
-// silently skipping verification.
-func buildHTTPClient(server, fp string) (*http.Client, error) {
-	base := &http.Client{Timeout: 10 * time.Second}
-	if !strings.HasPrefix(server, "https://") {
-		return base, nil
-	}
-	pins, err := parsePins(fp)
-	if err != nil {
-		return nil, err
-	}
-	if len(pins) == 0 {
-		return nil, fmt.Errorf("HTTPS requires NETPULSE_SERVER_FP (SHA-256 SPKI pin); omit it only for plain HTTP")
-	}
-	u, err := url.Parse(server)
-	if err != nil || u.Hostname() == "" {
-		return nil, fmt.Errorf("invalid NETPULSE_SERVER %q", server)
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.TLSClientConfig = &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			return verifySPKI(cs.PeerCertificates, pins)
-		},
-		MinVersion: tls.VersionTLS12,
-	}
-	base.Transport = transport
-	return base, nil
-}
-
-func parsePins(fp string) ([]string, error) {
-	var pins []string
-	for _, p := range strings.Split(strings.ToLower(strings.TrimSpace(fp)), ",") {
-		if p == "" {
-			continue
-		}
-		b, err := hex.DecodeString(p)
-		if err != nil || len(b) != sha256.Size {
-			return nil, fmt.Errorf("NETPULSE_SERVER_FP %q is not a SHA-256 fingerprint (64 hex chars)", p)
-		}
-		pins = append(pins, p)
-	}
-	return pins, nil
-}
-
-func verifySPKI(chain []*x509.Certificate, pins []string) error {
-	if len(chain) == 0 {
-		return fmt.Errorf("no peer certificates")
-	}
-	sum := sha256.Sum256(chain[0].RawSubjectPublicKeyInfo)
-	got := hex.EncodeToString(sum[:])
-	for _, p := range pins {
-		if p == got {
-			return nil
-		}
-	}
-	return fmt.Errorf("SPKI mismatch: the server's key %s matches no pinned key", got)
 }
 
 // FromData adapts a collector that returns only vendor-specific payload data.
@@ -165,39 +93,15 @@ func FromData(collect func(context.Context) (*probe.PayloadData, error)) Collect
 	}
 }
 
-// Push sends one signed payload to the existing NetPulse ingest endpoint.
+// Push delegates delivery to the common signed NetPulse client.
 func Push(ctx context.Context, cfg Config, payload *probe.Payload) error {
 	if payload == nil {
 		return fmt.Errorf("cannot push a nil payload")
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode payload: %w", err)
+	if cfg.PushClient == nil {
+		return fmt.Errorf("shared NetPulse push client is required")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Server+"/api/ingest/agent", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create ingest request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.Token)
-	mac := hmac.New(sha256.New, []byte(cfg.Token))
-	_, _ = mac.Write(body)
-	req.Header.Set("X-Agent-Signature", hex.EncodeToString(mac.Sum(nil)))
-
-	client := cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("post ingest: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
-		return fmt.Errorf("post ingest: %s: %s", resp.Status, strings.TrimSpace(string(responseBody)))
-	}
-	return nil
+	return cfg.PushClient.Send(ctx, cfg.Token, *payload)
 }
 
 // Run collects immediately and then at the configured interval until ctx is cancelled.

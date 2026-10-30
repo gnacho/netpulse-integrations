@@ -47,6 +47,13 @@ The supervisor accepts multiple vendor entries in one JSON config. Each
 integration keeps its own directory, poller and documentation while sharing
 the process, service unit and update path.
 
+The server trust settings apply to every supervisor integration. Use the
+root-level `server_fp` for NetPulse's self-signed HTTPS certificate or when
+the certificate name does not match the server URL; use `ca_file` for a
+private CA when the certificate name matches. Configure one or the other.
+Standalone pushers use the same delivery client and accept the equivalent
+`NETPULSE_SERVER_FP` or `NETPULSE_CA_FILE` environment variable.
+
 Every push is a signed HTTP request to `POST /api/ingest/agent`. The ingest
 contract, authentication, payload semantics and contribution rules are in the
 NetPulse guide:

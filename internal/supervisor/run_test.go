@@ -18,7 +18,7 @@ func (terminalTestError) Error() string  { return "credentials rejected" }
 func (terminalTestError) Terminal() bool { return true }
 
 func TestTerminalPollErrorStopsOnlyThatPoller(t *testing.T) {
-	client, err := push.NewClient("http://127.0.0.1", time.Second, "")
+	client, err := push.NewClient(push.Config{Server: "http://127.0.0.1", Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRunRejectsDuplicateSlugs(t *testing.T) {
 }
 
 func TestRunClosesPollersAfterContextCancellation(t *testing.T) {
-	client, err := push.NewClient("http://127.0.0.1", time.Second, "")
+	client, err := push.NewClient(push.Config{Server: "http://127.0.0.1", Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

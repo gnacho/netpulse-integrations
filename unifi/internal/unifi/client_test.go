@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -215,7 +216,7 @@ func TestSpeedLabel(t *testing.T) {
 		10:    "10MbE",
 		100:   "100MbE",
 		1000:  "1GbE",
-		2500:  "2GbE",
+		2500:  "2.5GbE",
 		10000: "10GbE",
 	}
 	for mbps, want := range cases {
@@ -227,10 +228,14 @@ func TestSpeedLabel(t *testing.T) {
 
 func TestResolveBase(t *testing.T) {
 	cases := map[string]string{
-		"192.168.1.1":            "https://192.168.1.1",
-		"192.168.1.1:8443":       "https://192.168.1.1:8443",
+		"192.168.1.2":            "https://192.168.1.2:8443",
+		"192.168.1.2:8443":       "https://192.168.1.2:8443",
+		"192.168.1.2:8080":       "https://192.168.1.2:8080",
+		"ctrl.lan/":              "https://ctrl.lan:8443",
 		"https://ctrl.lan:8443/": "https://ctrl.lan:8443",
+		"https://ctrl.lan":       "https://ctrl.lan",
 		"http://ctrl.lan":        "http://ctrl.lan",
+		"[fd00::5]":              "https://[fd00::5]:8443",
 	}
 	for in, want := range cases {
 		if got := resolveBase(in); got != want {
@@ -239,5 +244,26 @@ func TestResolveBase(t *testing.T) {
 	}
 	if got := resolveBase("   "); got != "" {
 		t.Fatalf("resolveBase(blank) = %q, want empty", got)
+	}
+}
+
+func TestLoginErrorPrefersAuthRejection(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	_, err := p.Poll(context.Background())
+	if err == nil {
+		t.Fatal("Poll with rejected credentials must fail")
+	}
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("error must report the auth rejection, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "404") {
+		t.Fatalf("error must not report the probe 404s, got: %v", err)
 	}
 }

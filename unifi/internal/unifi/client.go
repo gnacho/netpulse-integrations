@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
@@ -115,7 +116,8 @@ func newController(cfg Config) (*controller, error) {
 }
 
 // resolveBase keeps explicit URLs as they are and upgrades bare hosts to
-// https, where the controller listens on 8443 by convention.
+// https, adding the conventional controller port 8443 when the host carries
+// no port of its own.
 func resolveBase(host string) string {
 	host = strings.TrimSpace(host)
 	if host == "" {
@@ -124,7 +126,11 @@ func resolveBase(host string) string {
 	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
 		return strings.TrimRight(host, "/")
 	}
-	return "https://" + strings.TrimRight(host, "/")
+	host = strings.TrimRight(host, "/")
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return "https://" + host
+	}
+	return "https://" + host + ":8443"
 }
 
 // login posts the credentials to the UniFi OS endpoint first and to the
@@ -140,6 +146,7 @@ func (c *controller) login(ctx context.Context) error {
 		{"/api/login", ""},
 	}
 	var lastErr error
+	var authErr error
 	for _, a := range attempts {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+a.path, bytes.NewReader(body))
 		if err != nil {
@@ -156,7 +163,18 @@ func (c *controller) login(ctx context.Context) error {
 			c.prefix = a.prefix
 			return nil
 		}
-		lastErr = fmt.Errorf("%s: %s", a.path, resp.Status)
+		status := fmt.Errorf("%s: %s", a.path, resp.Status)
+		lastErr = status
+		// A 401/403 on an auth endpoint means the credentials were rejected,
+		// which beats the 404 of a later probe as the reported cause.
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if authErr == nil {
+				authErr = status
+			}
+		}
+	}
+	if authErr != nil {
+		return fmt.Errorf("unifi: login rejected: %w", authErr)
 	}
 	return fmt.Errorf("unifi: login failed on all endpoints: %w", lastErr)
 }

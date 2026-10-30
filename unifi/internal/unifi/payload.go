@@ -205,13 +205,14 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 }
 
 // speedLabel renders the negotiated port speed with the short unit the UI
-// shows. Zero or unknown speeds stay empty.
+// shows. Fractional gigabit speeds keep one decimal (2.5GbE). Zero or unknown
+// speeds stay empty.
 func speedLabel(mbps int) string {
 	switch {
 	case mbps <= 0:
 		return ""
 	case mbps >= 1000:
-		return strconv.Itoa(mbps/1000) + "GbE"
+		return strconv.FormatFloat(float64(mbps)/1000, 'f', -1, 64) + "GbE"
 	default:
 		return strconv.Itoa(mbps) + "MbE"
 	}

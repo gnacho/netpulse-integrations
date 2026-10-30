@@ -13,6 +13,7 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 | `routeros/` | RouterOS binary API on port 8728, REST fallback | RouterOS 7+: system, Ethernet ports, DHCP, ARP, bridge FDB, temperature, flash, firmware state and WAN rates |
 | `bbox/` | Bbox local HTTPS API | System, WAN, active hosts and Ethernet port rates |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
+| `unifi/` | UniFi controller REST API, read-only | Gateways, switches and APs of one site: FDB ports and uplink attachments, wireless clients, ARP identities and gateway uptime |
 
 All integrations are read-only: they read router data and do not change
 configuration or install or upgrade firmware.

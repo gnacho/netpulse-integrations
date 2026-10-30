@@ -17,6 +17,7 @@ import (
 	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse-integrations/internal/supervisor"
 	"github.com/gnacho/netpulse-integrations/routeros"
+	"github.com/gnacho/netpulse-integrations/unifi"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -39,6 +40,7 @@ type integration struct {
 	User     string `json:"user,omitempty"`
 	Password string `json:"password"`
 	Insecure bool   `json:"insecure,omitempty"`
+	Site     string `json:"site,omitempty"`
 }
 
 func main() {
@@ -112,6 +114,9 @@ func run(path string, logger *slog.Logger) error {
 			item.Close = poller.Close
 		case "routeros":
 			poller := routeros.New(routeros.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Insecure: entry.Insecure})
+			item.Collect = poller.Poll
+		case "unifi":
+			poller := unifi.New(unifi.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Site: entry.Site, Insecure: entry.Insecure})
 			item.Collect = poller.Poll
 		case "asuswrt":
 			prober := probe.NewProber(probe.ShellRunner{}, probe.Options{})

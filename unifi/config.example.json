@@ -1,0 +1,18 @@
+{
+  "server": "https://netpulse.example:3000",
+  "ca_file": "/etc/netpulse-integrations/netpulse-ca.pem",
+  "timeout": "15s",
+  "integrations": [
+    {
+      "type": "unifi",
+      "slug": "rack-controller",
+      "token": "REPLACE_WITH_NETPULSE_AGENT_TOKEN",
+      "interval": "60s",
+      "host": "192.168.1.2:8443",
+      "user": "netpulse-reader",
+      "password": "REPLACE_WITH_CONTROLLER_PASSWORD",
+      "insecure": true,
+      "site": "default"
+    }
+  ]
+}

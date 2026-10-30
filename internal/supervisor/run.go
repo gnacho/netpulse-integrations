@@ -28,10 +28,15 @@ func Run(ctx context.Context, client *push.Client, pollers []Poller, logger *slo
 	if logger == nil {
 		logger = slog.Default()
 	}
+	seen := make(map[string]bool, len(pollers))
 	for _, p := range pollers {
 		if p.Vendor == "" || p.Slug == "" || p.Token == "" || p.Interval < 10*time.Second || p.Interval%time.Second != 0 || p.Collect == nil {
 			return fmt.Errorf("invalid configuration for poller %q", p.Slug)
 		}
+		if seen[p.Slug] {
+			return fmt.Errorf("duplicate integration slug %q: two pollers would push as the same router", p.Slug)
+		}
+		seen[p.Slug] = true
 	}
 	var wg sync.WaitGroup
 	for _, configured := range pollers {

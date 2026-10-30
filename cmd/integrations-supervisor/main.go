@@ -26,6 +26,7 @@ var version = "dev"
 type fileConfig struct {
 	Server       string        `json:"server"`
 	CAFile       string        `json:"ca_file,omitempty"`
+	ServerFP     string        `json:"server_fp,omitempty"`
 	Timeout      string        `json:"timeout,omitempty"`
 	Integrations []integration `json:"integrations"`
 }
@@ -76,7 +77,13 @@ func run(path string, logger *slog.Logger) error {
 			return errors.New("timeout must be a positive Go duration")
 		}
 	}
-	client, err := push.NewClient(cfg.Server, pushTimeout, cfg.CAFile)
+	// The JSON field wins; NETPULSE_SERVER_FP lets container setups inject the
+	// pin without rewriting the config file.
+	serverFP := strings.TrimSpace(cfg.ServerFP)
+	if serverFP == "" {
+		serverFP = strings.TrimSpace(os.Getenv("NETPULSE_SERVER_FP"))
+	}
+	client, err := push.NewClient(cfg.Server, pushTimeout, cfg.CAFile, serverFP)
 	if err != nil {
 		return err
 	}

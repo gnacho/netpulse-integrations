@@ -67,8 +67,8 @@ of reusing the admin account.
 
 ## Limits
 
-- HTTPS from the pusher to a NetPulse server behind a private CA is not
-  supported yet; it lands with the transport CA option (#15). Plain HTTP works
-  today.
+- HTTPS to the NetPulse server needs the supervisor config to carry
+  `server_fp` (SPKI SHA-256 pin) or `ca_file`; either one alone, never both.
+  Plain HTTP works without either.
 - Read-only by design: no adoption, no configuration, no firmware actions, and
   no cloud access.

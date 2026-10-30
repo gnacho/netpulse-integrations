@@ -7,7 +7,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -99,9 +99,9 @@ func buildHTTPClient(server, fp string) (*http.Client, error) {
 	if !strings.HasPrefix(server, "https://") {
 		return base, nil
 	}
-	pins, err := parsePins(fp)
+	pins, err := tlspin.Parse(fp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("NETPULSE_SERVER_FP: %w", err)
 	}
 	if len(pins) == 0 {
 		return nil, fmt.Errorf("HTTPS requires NETPULSE_SERVER_FP (SHA-256 SPKI pin); omit it only for plain HTTP")
@@ -114,41 +114,12 @@ func buildHTTPClient(server, fp string) (*http.Client, error) {
 	transport.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			return verifySPKI(cs.PeerCertificates, pins)
+			return tlspin.Verify(cs.PeerCertificates, pins)
 		},
 		MinVersion: tls.VersionTLS12,
 	}
 	base.Transport = transport
 	return base, nil
-}
-
-func parsePins(fp string) ([]string, error) {
-	var pins []string
-	for _, p := range strings.Split(strings.ToLower(strings.TrimSpace(fp)), ",") {
-		if p == "" {
-			continue
-		}
-		b, err := hex.DecodeString(p)
-		if err != nil || len(b) != sha256.Size {
-			return nil, fmt.Errorf("NETPULSE_SERVER_FP %q is not a SHA-256 fingerprint (64 hex chars)", p)
-		}
-		pins = append(pins, p)
-	}
-	return pins, nil
-}
-
-func verifySPKI(chain []*x509.Certificate, pins []string) error {
-	if len(chain) == 0 {
-		return fmt.Errorf("no peer certificates")
-	}
-	sum := sha256.Sum256(chain[0].RawSubjectPublicKeyInfo)
-	got := hex.EncodeToString(sum[:])
-	for _, p := range pins {
-		if p == got {
-			return nil
-		}
-	}
-	return fmt.Errorf("SPKI mismatch: the server's key %s matches no pinned key", got)
 }
 
 // FromData adapts a collector that returns only vendor-specific payload data.

@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -24,7 +26,15 @@ type Client struct {
 	http   *http.Client
 }
 
-func NewClient(server string, timeout time.Duration, caFile string) (*Client, error) {
+// NewClient returns a client that pushes to the NetPulse ingest endpoint.
+// Either caFile (a PEM CA added to the system trust roots) or serverFP (a
+// SHA-256 SPKI pin, comma-separated for several keys) authenticates the
+// server; setting both is a configuration error. A pin is the option that
+// works with the NetPulse generated certificate, which is issued for
+// 127.0.0.1 and fails host name verification from any LAN address. An HTTPS
+// server URL with neither option is rejected instead of falling back to a
+// raw x509 failure at push time.
+func NewClient(server string, timeout time.Duration, caFile, serverFP string) (*Client, error) {
 	server = strings.TrimRight(strings.TrimSpace(server), "/")
 	if server == "" {
 		return nil, fmt.Errorf("NetPulse server URL is required")
@@ -32,12 +42,26 @@ func NewClient(server string, timeout time.Duration, caFile string) (*Client, er
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
+	caFile = strings.TrimSpace(caFile)
+	serverFP = strings.TrimSpace(serverFP)
+	if caFile != "" && serverFP != "" {
+		return nil, errors.New("ca_file and server_fp are mutually exclusive: a pin is the option that works with the NetPulse generated certificate")
+	}
+	var pins []string
+	if serverFP != "" {
+		var err error
+		pins, err = tlspin.Parse(serverFP)
+		if err != nil {
+			return nil, fmt.Errorf("server_fp: %w", err)
+		}
+	}
 	transport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("default HTTP transport has unexpected type %T", http.DefaultTransport)
 	}
 	transport = transport.Clone()
-	if strings.TrimSpace(caFile) != "" {
+	switch {
+	case caFile != "":
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			return nil, fmt.Errorf("read NetPulse CA file: %w", err)
@@ -55,6 +79,16 @@ func NewClient(server string, timeout time.Duration, caFile string) (*Client, er
 			tlsConfig.RootCAs = roots
 		}
 		transport.TLSClientConfig = tlsConfig
+	case len(pins) > 0:
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				return tlspin.Verify(cs.PeerCertificates, pins)
+			},
+			MinVersion: tls.VersionTLS12,
+		}
+	case strings.HasPrefix(server, "https://"):
+		return nil, errors.New("HTTPS requires server_fp (SHA-256 SPKI pin) or ca_file; omit both only for plain HTTP")
 	}
 	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport}}, nil
 }

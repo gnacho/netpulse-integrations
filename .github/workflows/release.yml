@@ -6,6 +6,7 @@ on:
       - 'routeros/v*'
       - 'asuswrt/v*'
       - 'bbox/v*'
+      - 'fn/v*'
       - 'unifi/v*'
 
 permissions:
@@ -58,6 +59,13 @@ jobs:
               binary=netpulse-integrations
               target=./cmd/integrations-supervisor
               ldvar=main.version
+              arches="amd64 arm64"
+              ;;
+            fn/v*)
+              name=fn
+              binary=fn-pusher
+              target=./fn/cmd/fn-pusher
+              ldvar=main.Version
               arches="amd64 arm64"
               ;;
             unifi/v*)

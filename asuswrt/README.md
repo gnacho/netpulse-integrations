@@ -93,6 +93,14 @@ Add this line to `/jffs/scripts/init-start` or `services-start`:
 /jffs/netpulse-asuswrt-start &
 ```
 
+`services-start` runs early in boot, and on several models the radios are not
+up yet at that point. The first sample therefore waits up to two minutes for
+the radios, retrying with a short backoff (5s, 10s, 30s, 60s) and one log line
+per retry. The wait only happens while the process is young and the box has a
+radio tool (`iw`, `iwinfo` or `wl`): routers without any radio tool, and real
+errors, push or fail immediately as before, and once a sample has carried
+radios the grace never applies again.
+
 To upgrade, stop the old process, replace the binary and start the launcher again. NetPulse does not upgrade or reinstall external agents.
 
 ## Verify

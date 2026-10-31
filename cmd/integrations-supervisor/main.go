@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/asuswrt"
 	"github.com/gnacho/netpulse-integrations/bbox"
 	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse-integrations/internal/supervisor"
@@ -141,14 +142,8 @@ func run(path string, logger *slog.Logger) error {
 			poller := unifi.New(unifi.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Site: entry.Site, Insecure: entry.Insecure})
 			item.Collect = poller.Poll
 		case "asuswrt":
-			prober := probe.NewProber(probe.ShellRunner{}, probe.Options{})
-			item.Collect = func(ctx context.Context) (*probe.PayloadData, error) {
-				payload := prober.Build(ctx, item.Slug, item.Version)
-				if payload == nil {
-					return nil, errors.New("Asuswrt probe returned no payload")
-				}
-				return &payload.Data, nil
-			}
+			collector := asuswrt.NewCollector(probe.ShellRunner{}, item.Slug, item.Version)
+			item.Collect = collector.CollectData
 		default:
 			return fmt.Errorf("integration %d: unsupported type %q", i, entry.Type)
 		}

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/gnacho/netpulse-integrations/asuswrt"
 	"github.com/gnacho/netpulse-integrations/internal/pusher"
 	"github.com/gnacho/netpulse/agent/probe"
 )
@@ -18,11 +19,8 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	prober := probe.NewProber(probe.ShellRunner{}, probe.Options{})
-	return pusher.Run(ctx, cfg, func(ctx context.Context) (*probe.Payload, error) {
-		payload := prober.Build(ctx, cfg.Slug, cfg.Version)
-		return payload, nil
-	})
+	collector := asuswrt.NewCollector(probe.ShellRunner{}, cfg.Slug, cfg.Version)
+	return pusher.Run(ctx, cfg, collector.Collect)
 }
 
 func main() {

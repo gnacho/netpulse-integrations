@@ -4,23 +4,33 @@
 // it. This package keeps the vendor client outside the NetPulse server and
 // returns the same probe.PayloadData used by every external integration.
 //
-// The binary API on port 8728 is preferred because many RouterOS installs
-// keep www/www-ssl disabled. REST is a fallback for readers that only expose
-// the web API, and covers system identity/resource only, matching the old
-// server fallback.
+// The binary API is preferred: with APITLS set it connects over TLS to the
+// api-ssl service (port 8729) and sends the login credentials only after the
+// handshake has authenticated the router certificate. Without APITLS the API
+// speaks plaintext on port 8728, which keeps configurations written before
+// TLS support existed working but sends the credentials in the clear.
+// REST is a fallback for readers that only expose the web API, covers system
+// identity/resource only, matching the old server fallback, and is https
+// only: the client never degrades to plaintext http with Basic
+// authentication.
 package routeros
 
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,11 +51,33 @@ type Config struct {
 	// conventional 8728. It exists so tests can point the poller at a fake
 	// API server on a free port.
 	APIPort int
+	// APITLS dials the binary API over TLS instead of plaintext. The zero
+	// value keeps the legacy plaintext API on 8728; with APITLS set the
+	// poller connects to the api-ssl service, whose conventional port is
+	// 8729, and sends the credentials only after the TLS handshake
+	// succeeded. APIPort still overrides the port.
+	APITLS bool
+	// CACert is a PEM file whose certificate must have signed the router
+	// certificate. It authenticates the api-ssl connection and https REST
+	// through standard x509 verification. Mutually exclusive with CertFP.
+	CACert string
+	// CertFP is a comma-separated list of SHA-256 certificate fingerprints
+	// (64 hex chars each), the same format as the supervisor's server_fp.
+	// A TLS connection to the router is accepted only when its leaf
+	// certificate hashes to one of the pins, so self-signed RouterOS
+	// certificates work without hostname verification. Mutually exclusive
+	// with CACert.
+	CertFP string
 }
 
 // Poller owns the previous WAN counters so rates survive between polls.
 type Poller struct {
 	cfg Config
+	// tls is the resolved router trust configuration for api-ssl and https
+	// REST; nil means standard system verification. err holds a TLS trust
+	// configuration error and fails every poll until the config is fixed.
+	tls *tls.Config
+	err error
 
 	mu   sync.Mutex
 	prev *rateSample
@@ -56,11 +88,15 @@ func New(cfg Config) *Poller {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	return &Poller{cfg: cfg}
+	tlsCfg, err := buildTLSConfig(cfg)
+	return &Poller{cfg: cfg, tls: tlsCfg, err: err}
 }
 
 // Poll tries the binary API first and REST second.
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
 	apiData, apiErr := p.pollAPI(ctx)
 	if apiErr == nil {
 		return apiData, nil
@@ -148,28 +184,33 @@ func buildPayload(res routerOSResource, id routerOSIdentity) (*probe.PayloadData
 	return &probe.PayloadData{System: sys}, nil
 }
 
-func (p *Poller) pollREST(ctx context.Context) (*probe.PayloadData, error) {
-	client := &http.Client{Timeout: p.cfg.Timeout}
-	if p.cfg.Insecure {
-		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // opt-in for RouterOS self-signed certs
-	}
+// restPlainHost reports whether the configured REST base explicitly asks for
+// plaintext http. Such a configuration is rejected instead of silently
+// sending Basic credentials in the clear.
+func restPlainHost(raw string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "http://")
+}
 
-	var lastErr error
-	for _, scheme := range [...]string{"https", "http"} {
-		base := scheme + "://" + restHost(p.cfg.Host)
-		var res routerOSResource
-		if err := fetchREST(ctx, client, base, p.cfg.User, p.cfg.Password, "/rest/system/resource", &res); err != nil {
-			lastErr = err
-			continue
-		}
-		var id routerOSIdentity
-		if err := fetchREST(ctx, client, base, p.cfg.User, p.cfg.Password, "/rest/system/identity", &id); err != nil {
-			lastErr = err
-			continue
-		}
-		return buildPayload(res, id)
+func (p *Poller) pollREST(ctx context.Context) (*probe.PayloadData, error) {
+	if restPlainHost(p.cfg.Host) {
+		return nil, errors.New("routeros rest: plaintext http is not supported; serve the REST API over https (www-ssl) or use the binary API")
 	}
-	return nil, lastErr
+	client := &http.Client{Timeout: p.cfg.Timeout}
+	if p.tls != nil {
+		client.Transport = &http.Transport{TLSClientConfig: p.tls}
+	}
+	// No scheme loop: an https failure is final. The old fallback retried
+	// over plaintext http and sent the Basic credentials in the clear.
+	base := "https://" + restHost(p.cfg.Host)
+	var res routerOSResource
+	if err := fetchREST(ctx, client, base, p.cfg.User, p.cfg.Password, "/rest/system/resource", &res); err != nil {
+		return nil, err
+	}
+	var id routerOSIdentity
+	if err := fetchREST(ctx, client, base, p.cfg.User, p.cfg.Password, "/rest/system/identity", &id); err != nil {
+		return nil, err
+	}
+	return buildPayload(res, id)
 }
 
 func fetchREST(ctx context.Context, client *http.Client, base, user, pass, path string, out any) error {
@@ -215,11 +256,151 @@ func protocolErrorf(format string, args ...any) *ProtocolError {
 	return &ProtocolError{message: fmt.Sprintf(format, args...)}
 }
 
-func dialRouterOSAPI(ctx context.Context, host, port, user, pass string, timeout time.Duration) (*routerOSAPIConn, error) {
+// TrustError marks a TLS trust failure against the router: the certificate
+// did not match the configured cert_fp, or standard verification rejected
+// it. The handshake failed before the login exchange, so no credential
+// reached the network. The condition is not terminal: the next poll cycle
+// retries it.
+type TrustError struct{ message string }
+
+func (e *TrustError) Error() string { return e.message }
+
+func trustErrorf(format string, args ...any) *TrustError {
+	return &TrustError{message: fmt.Sprintf(format, args...)}
+}
+
+// buildTLSConfig resolves how TLS connections to the router (api-ssl and
+// https REST) authenticate the server certificate. CertFP pins the exact
+// certificate, CACert trusts the CA that signed it and Insecure skips
+// verification explicitly, in that order of precedence. With none of them
+// the connection uses standard system verification, which fails closed for
+// the self-signed certificates RouterOS usually presents: at least one form
+// of trust must be expressed to accept one.
+func buildTLSConfig(cfg Config) (*tls.Config, error) {
+	certFP := strings.TrimSpace(cfg.CertFP)
+	caCert := strings.TrimSpace(cfg.CACert)
+	if certFP != "" && caCert != "" {
+		return nil, errors.New("cert_fp and ca_cert are mutually exclusive: pick one way to authenticate the router certificate")
+	}
+	switch {
+	case certFP != "":
+		fingerprints, err := parseCertFP(certFP)
+		if err != nil {
+			return nil, err
+		}
+		return &tls.Config{
+			InsecureSkipVerify: true, //nolint:gosec // deliberate certificate pinning below
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				return verifyCertificateFingerprint(cs.PeerCertificates, fingerprints)
+			},
+			MinVersion: tls.VersionTLS12,
+		}, nil
+	case caCert != "":
+		caPEM, err := os.ReadFile(caCert)
+		if err != nil {
+			return nil, fmt.Errorf("read router CA file: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("router CA file contains no valid certificates")
+		}
+		return &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, nil
+	case cfg.Insecure:
+		return &tls.Config{InsecureSkipVerify: true}, nil //nolint:gosec // explicit opt-out for self-signed RouterOS certificates
+	}
+	return nil, nil
+}
+
+// parseCertFP normalizes a comma-separated list of SHA-256 certificate
+// fingerprints and rejects values that cannot be SHA-256 digests, so a typo
+// fails at configuration time instead of during the first handshake.
+func parseCertFP(raw string) ([]string, error) {
+	var fingerprints []string
+	for _, f := range strings.Split(strings.ToLower(strings.TrimSpace(raw)), ",") {
+		if f == "" {
+			continue
+		}
+		b, err := hex.DecodeString(f)
+		if err != nil || len(b) != sha256.Size {
+			return nil, fmt.Errorf("cert_fp %q is not a SHA-256 certificate fingerprint (64 hex chars)", f)
+		}
+		fingerprints = append(fingerprints, f)
+	}
+	return fingerprints, nil
+}
+
+// verifyCertificateFingerprint checks the leaf certificate of a TLS
+// connection against SHA-256 fingerprints of the whole certificate. RouterOS
+// api-ssl usually presents a self-signed certificate whose subject never
+// matches a hostname, so the pin covers the full certificate instead of only
+// its public key.
+func verifyCertificateFingerprint(chain []*x509.Certificate, fingerprints []string) error {
+	if len(chain) == 0 {
+		return errors.New("no peer certificates")
+	}
+	sum := sha256.Sum256(chain[0].Raw)
+	got := hex.EncodeToString(sum[:])
+	for _, f := range fingerprints {
+		if f == got {
+			return nil
+		}
+	}
+	return trustErrorf("router certificate fingerprint %s matches no configured cert_fp", got)
+}
+
+// wrapHandshakeError classifies TLS handshake failures. A certificate
+// mismatch becomes a TrustError so callers can tell trust failures apart, and
+// a server that answers in plaintext while TLS was expected gets an error
+// that names the likely cause: the api-ssl service is disabled.
+func wrapHandshakeError(err error) error {
+	var trust *TrustError
+	if errors.As(err, &trust) {
+		return fmt.Errorf("routeros api: %w (no credentials were sent)", trust)
+	}
+	if strings.Contains(err.Error(), "first record does not look like a TLS handshake") {
+		return fmt.Errorf("routeros api: the endpoint answers in plaintext, not TLS: is the api-ssl service enabled? (%v)", err)
+	}
+	return err
+}
+
+// dialRouterOSAPI opens the binary API session. With tlsCfg set the
+// connection is TLS (api-ssl) and the handshake runs under the same timeout
+// as every later read, so a stuck endpoint cannot hang the poller before the
+// deadline machinery takes over. The credentials travel only after the
+// handshake succeeded, so a certificate verification failure never sends
+// them.
+func dialRouterOSAPI(ctx context.Context, host, port, user, pass string, timeout time.Duration, tlsCfg *tls.Config) (*routerOSAPIConn, error) {
+	addr := net.JoinHostPort(host, port)
 	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	if tlsCfg != nil {
+		// A manual tls.Client does not infer ServerName from the address
+		// the way tls.Dial does, so standard verification needs it set.
+		// Clone instead of mutating: the poller reuses the config.
+		if tlsCfg.ServerName == "" && !tlsCfg.InsecureSkipVerify {
+			tlsCfg = tlsCfg.Clone()
+			tlsCfg.ServerName = host
+		}
+		tc := tls.Client(conn, tlsCfg)
+		if err := tc.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		if err := tc.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+			return nil, wrapHandshakeError(err)
+		}
+		if err := tc.SetDeadline(time.Time{}); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		conn = tc
 	}
 	c := &routerOSAPIConn{conn: conn, r: bufio.NewReader(conn), timeout: timeout}
 	if err := c.writeSentence("/login", "=name="+user, "=password="+pass); err != nil {
@@ -416,10 +597,17 @@ func readRouterOSLen(r *bufio.Reader) (int, error) {
 
 func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 	port := "8728"
+	if p.cfg.APITLS {
+		port = "8729"
+	}
 	if p.cfg.APIPort > 0 {
 		port = strconv.Itoa(p.cfg.APIPort)
 	}
-	conn, err := dialRouterOSAPI(ctx, apiHost(p.cfg.Host), port, p.cfg.User, p.cfg.Password, p.cfg.Timeout)
+	tlsCfg := p.tls
+	if !p.cfg.APITLS {
+		tlsCfg = nil
+	}
+	conn, err := dialRouterOSAPI(ctx, apiHost(p.cfg.Host), port, p.cfg.User, p.cfg.Password, p.cfg.Timeout, tlsCfg)
 	if err != nil {
 		return nil, err
 	}

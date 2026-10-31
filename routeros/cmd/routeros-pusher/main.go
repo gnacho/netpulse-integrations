@@ -35,6 +35,9 @@ func run(ctx context.Context) error {
 		User:     user,
 		Password: password,
 		Insecure: os.Getenv("ROUTEROS_INSECURE") == "1",
+		APITLS:   os.Getenv("ROUTEROS_API_TLS") == "1",
+		CACert:   os.Getenv("ROUTEROS_CA_CERT"),
+		CertFP:   os.Getenv("ROUTEROS_CERT_FP"),
 	})
 	return pusher.Run(ctx, cfg, pusher.FromData(poller.Poll))
 }

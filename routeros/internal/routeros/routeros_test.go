@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"net"
@@ -386,9 +387,10 @@ type fakeRouterOSAPI struct {
 	listener net.Listener
 	reply    func(cmd string) [][]byte
 
-	mu       sync.Mutex
-	active   net.Conn
-	sawClose bool
+	mu        sync.Mutex
+	active    net.Conn
+	sawClose  bool
+	loginSeen bool
 }
 
 // fakeAPIPoller starts a fake API server and a poller aimed at it.
@@ -414,10 +416,27 @@ func fakeAPIPoller(t *testing.T, reply func(cmd string) [][]byte, timeout time.D
 }
 
 func newFakeRouterOSAPI(t *testing.T, reply func(cmd string) [][]byte) *fakeRouterOSAPI {
+	return startFakeRouterOSAPI(t, reply, nil)
+}
+
+// newFakeRouterOSAPITLS starts the same fake behind TLS, the way the api-ssl
+// service does: the RouterOS sentence protocol runs unchanged inside the
+// TLS connection.
+func newFakeRouterOSAPITLS(t *testing.T, reply func(cmd string) [][]byte, cert tls.Certificate) *fakeRouterOSAPI {
+	return startFakeRouterOSAPI(t, reply, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})
+}
+
+func startFakeRouterOSAPI(t *testing.T, reply func(cmd string) [][]byte, tlsCfg *tls.Config) *fakeRouterOSAPI {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if tlsCfg != nil {
+		ln = tls.NewListener(ln, tlsCfg)
 	}
 	f := &fakeRouterOSAPI{listener: ln, reply: reply}
 	go func() {
@@ -438,6 +457,21 @@ func newFakeRouterOSAPI(t *testing.T, reply func(cmd string) [][]byte) *fakeRout
 		f.mu.Unlock()
 	})
 	return f
+}
+
+// fakePort extracts the free port the listener ended up on, so tests can
+// point APIPort at it.
+func fakePort(t *testing.T, ln net.Listener) int {
+	t.Helper()
+	_, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
 }
 
 func (f *fakeRouterOSAPI) addr() string { return f.listener.Addr().String() }
@@ -468,6 +502,9 @@ func (f *fakeRouterOSAPI) serve(conn net.Conn) {
 				return
 			}
 			loggedIn = true
+			f.mu.Lock()
+			f.loginSeen = true
+			f.mu.Unlock()
 			frames = [][]byte{testSentence("!done")}
 		} else {
 			frames = f.reply(sentence[0])
@@ -487,6 +524,14 @@ func (f *fakeRouterOSAPI) closeObserved() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sawClose
+}
+
+// sawLogin reports whether the fake parsed a /login sentence, which only
+// happens after the client completed the TLS handshake when one is expected.
+func (f *fakeRouterOSAPI) sawLogin() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loginSeen
 }
 
 // requireCloseObserved waits briefly for the fake to notice the closed

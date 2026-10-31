@@ -42,6 +42,13 @@ type integration struct {
 	Password string `json:"password"`
 	Insecure bool   `json:"insecure,omitempty"`
 	Site     string `json:"site,omitempty"`
+	// RouterOS TLS trust settings. APITLS dials the binary API over TLS
+	// (api-ssl, port 8729); CACert and CertFP authenticate the router
+	// certificate for that connection and for https REST. Other vendors
+	// ignore them.
+	APITLS bool   `json:"api_tls,omitempty"`
+	CACert string `json:"ca_cert,omitempty"`
+	CertFP string `json:"cert_fp,omitempty"`
 }
 
 func main() {
@@ -120,7 +127,15 @@ func run(path string, logger *slog.Logger) error {
 			item.Collect = poller.Poll
 			item.Close = poller.Close
 		case "routeros":
-			poller := routeros.New(routeros.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Insecure: entry.Insecure})
+			poller := routeros.New(routeros.Config{
+				Host:     entry.Host,
+				User:     entry.User,
+				Password: entry.Password,
+				Insecure: entry.Insecure,
+				APITLS:   entry.APITLS,
+				CACert:   entry.CACert,
+				CertFP:   entry.CertFP,
+			})
 			item.Collect = poller.Poll
 		case "unifi":
 			poller := unifi.New(unifi.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Site: entry.Site, Insecure: entry.Insecure})

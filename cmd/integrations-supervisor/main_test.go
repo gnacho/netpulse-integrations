@@ -87,3 +87,21 @@ func TestRunServerFPFallsBackToEnv(t *testing.T) {
 		t.Fatalf("env pin must be validated, got %v", err)
 	}
 }
+
+// The RouterOS TLS trust settings must survive JSON parsing, or a tag typo
+// would silently ignore api_tls, ca_cert and cert_fp in the supervisor
+// config, the deployment path most users take.
+func TestIntegrationParsesRouterOSTLSFields(t *testing.T) {
+	const doc = `{"server":"http://127.0.0.1:3000","integrations":[{"type":"routeros","slug":"rt","token":"secret","host":"192.0.2.1","user":"reader","password":"secret","api_tls":true,"cert_fp":"00","ca_cert":"/tmp/router-ca.pem"}]}`
+	var cfg fileConfig
+	if err := json.Unmarshal([]byte(doc), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Integrations) != 1 {
+		t.Fatalf("integrations = %d, want 1", len(cfg.Integrations))
+	}
+	entry := cfg.Integrations[0]
+	if !entry.APITLS || entry.CertFP != "00" || entry.CACert != "/tmp/router-ca.pem" {
+		t.Fatalf("routeros TLS fields lost in parsing: %+v", entry)
+	}
+}

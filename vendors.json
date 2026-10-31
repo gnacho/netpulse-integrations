@@ -19,6 +19,15 @@
       "description": "Read-only Bouygues Bbox poller shipped inside the shared integrations supervisor binary"
     },
     {
+      "id": "fn",
+      "mode": "local",
+      "arches": ["amd64", "arm64"],
+      "tagPrefix": "fn/v",
+      "binary": "fn-pusher",
+      "target": "fn/cmd/fn-pusher",
+      "description": "Read-only pusher for Realtek RTL9303 switches (FN/希力威视 ODM family) over their web backend, with an optional CLI probe for the fan temperature"
+    },
+    {
       "id": "routeros",
       "mode": "local",
       "arches": ["amd64"],

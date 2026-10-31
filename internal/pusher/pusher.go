@@ -172,7 +172,10 @@ func Push(ctx context.Context, cfg Config, payload *probe.Payload) error {
 }
 
 // Run collects immediately and then at the configured interval until ctx is cancelled.
-// Collection and delivery failures are logged and retried on the next cycle.
+// Collection and delivery failures are logged and retried on the next cycle,
+// except terminal failures (rejected credentials, reported through the
+// Terminal method of the error): those stop the pusher for good, because
+// retrying them only feeds the vendor's failed-login counter.
 func Run(ctx context.Context, cfg Config, collect CollectFunc) error {
 	if collect == nil {
 		return fmt.Errorf("collector is required")
@@ -191,6 +194,10 @@ func Run(ctx context.Context, cfg Config, collect CollectFunc) error {
 			err = fmt.Errorf("collector returned a nil payload")
 		}
 		if err != nil {
+			if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() {
+				slog.Error("ALERT: integration disabled after terminal poll failure; correct credentials and restart the service", "name", cfg.Name, "slug", cfg.Slug, "error", err)
+				return nil
+			}
 			slog.Error(cfg.Name+": collection failed", "err", err)
 		} else {
 			normalizePayload(cfg, payload)

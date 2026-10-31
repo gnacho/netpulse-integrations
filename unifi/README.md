@@ -63,10 +63,18 @@ Standalone binary environment:
 | `UNIFI_INSECURE` | `1` to accept the controller self-signed certificate. Controllers usually ship one, so this is normally `1`. |
 
 Create a dedicated read-only account on the controller for the poller instead
-of reusing the admin account.
+of reusing the admin account. The account must have two-factor authentication
+disabled: local accounts with 2FA/TOTP enabled cannot log in through the
+controller API the poller uses. This is a known limitation of the API, and the
+poller has no workaround for it.
 
 ## Limits
 
+- Authentication failures are terminal: rejected credentials (401/403 on the
+  login or on the site queries) stop the poller with an alert instead of
+  retrying the login every cycle, so a wrong password cannot trip the
+  controller's brute-force protection. Fix the credentials and restart the
+  service to recover. Transient network errors keep being retried.
 - HTTPS to the NetPulse server needs the supervisor config to carry
   `server_fp` (SPKI SHA-256 pin) or `ca_file`; either one alone, never both.
   Plain HTTP works without either.

@@ -57,6 +57,16 @@ func New(cfg Config) *Poller {
 	return &Poller{cfg: cfg}
 }
 
+// AuthenticationError marks rejected credentials or a rejected session as
+// terminal for this poller. Retrying rejected credentials feeds the
+// controller's failed-login counter and can trip its brute-force protection,
+// so the supervisor and the standalone pusher stop instead of running the
+// poller again next cycle.
+type AuthenticationError struct{ message string }
+
+func (e *AuthenticationError) Error() string  { return e.message }
+func (e *AuthenticationError) Terminal() bool { return true }
+
 // Poll logs in, reads devices and clients and translates them into the
 // neutral payload.
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
@@ -174,7 +184,7 @@ func (c *controller) login(ctx context.Context) error {
 		}
 	}
 	if authErr != nil {
-		return fmt.Errorf("unifi: login rejected: %w", authErr)
+		return &AuthenticationError{message: fmt.Sprintf("unifi: login rejected: %v", authErr)}
 	}
 	return fmt.Errorf("unifi: login failed on all endpoints: %w", lastErr)
 }
@@ -190,6 +200,11 @@ func (c *controller) get(ctx context.Context, endpoint string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	// A rejected session on a site query is the same terminal situation as
+	// rejected credentials at login time.
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &AuthenticationError{message: fmt.Sprintf("unifi: GET %s: %s: session rejected", endpoint, resp.Status)}
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 		return fmt.Errorf("unifi: GET %s: %s: %s", endpoint, resp.Status, body)

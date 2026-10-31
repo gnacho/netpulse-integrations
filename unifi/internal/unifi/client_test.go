@@ -3,6 +3,7 @@ package unifi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -266,4 +267,93 @@ func TestLoginErrorPrefersAuthRejection(t *testing.T) {
 	if strings.Contains(err.Error(), "404") {
 		t.Fatalf("error must not report the probe 404s, got: %v", err)
 	}
+	var authErr *AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("rejected credentials must be an AuthenticationError, got %T", err)
+	}
+	if terminal, ok := err.(interface{ Terminal() bool }); !ok || !terminal.Terminal() {
+		t.Fatalf("rejected credentials must be terminal for the supervisor, got %T", err)
+	}
+}
+
+// A session rejected between the login and the site queries is the same
+// terminal situation as rejected credentials at login time.
+func TestPollSessionRejectedOnQueryIsTerminal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "session expired", http.StatusUnauthorized)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	_, err := p.Poll(context.Background())
+	if err == nil {
+		t.Fatal("Poll with a rejected session must fail")
+	}
+	var authErr *AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("rejected session must be an AuthenticationError, got %T", err)
+	}
+}
+
+// Transient failures (controller down, server errors) are not terminal: the
+// supervisor and the pusher keep retrying them on the next cycles.
+func TestPollTransientErrorsStayRetryable(t *testing.T) {
+	t.Run("controller unreachable", func(t *testing.T) {
+		ts := httptest.NewServer(http.NewServeMux())
+		url := ts.URL
+		ts.Close()
+
+		p := New(Config{Host: url})
+		_, err := p.Poll(context.Background())
+		if err == nil {
+			t.Fatal("Poll against a down controller must fail")
+		}
+		if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() {
+			t.Fatalf("network failure must stay retryable, got terminal: %v", err)
+		}
+	})
+	t.Run("login 500", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "overloaded", http.StatusInternalServerError)
+		})
+		ts := httptest.NewServer(mux)
+		defer ts.Close()
+
+		p := New(Config{Host: ts.URL})
+		_, err := p.Poll(context.Background())
+		if err == nil {
+			t.Fatal("Poll with a 500 login must fail")
+		}
+		if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() {
+			t.Fatalf("a 500 login must stay retryable, got terminal: %v", err)
+		}
+	})
+	t.Run("query 500", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+			http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+			w.WriteHeader(http.StatusOK)
+		})
+		mux.HandleFunc("/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "overloaded", http.StatusInternalServerError)
+		})
+		ts := httptest.NewServer(mux)
+		defer ts.Close()
+
+		p := New(Config{Host: ts.URL})
+		_, err := p.Poll(context.Background())
+		if err == nil {
+			t.Fatal("Poll with a 500 query must fail")
+		}
+		if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() {
+			t.Fatalf("a 500 query must stay retryable, got terminal: %v", err)
+		}
+	})
 }

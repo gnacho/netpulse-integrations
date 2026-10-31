@@ -1,12 +1,14 @@
 package pusher
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,5 +235,35 @@ func TestFromDataRejectsNil(t *testing.T) {
 	collect := FromData(func(context.Context) (*probe.PayloadData, error) { return nil, nil })
 	if _, err := collect(context.Background()); err == nil {
 		t.Fatal("expected nil data error")
+	}
+}
+
+type terminalTestError struct{}
+
+func (terminalTestError) Error() string  { return "credentials rejected" }
+func (terminalTestError) Terminal() bool { return true }
+
+// A terminal poll failure (rejected credentials) must stop the pusher instead
+// of retrying the same failed login every cycle.
+func TestRunStopsOnTerminalPollFailure(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(old)
+
+	cfg := Config{Name: "test-pusher", Server: "http://127.0.0.1:1", Token: "token", Slug: "ctrl", Interval: 20 * time.Millisecond}
+	calls := 0
+	err := Run(context.Background(), cfg, func(context.Context) (*probe.Payload, error) {
+		calls++
+		return nil, terminalTestError{}
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("collector called %d times, want 1", calls)
+	}
+	if !strings.Contains(logs.String(), "ALERT: integration disabled") {
+		t.Fatalf("terminal failure did not log an alert: %s", logs.String())
 	}
 }

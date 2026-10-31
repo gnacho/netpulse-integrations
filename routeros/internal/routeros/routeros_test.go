@@ -92,6 +92,44 @@ func TestRouterOSPortsOnlyPhysicalEthernet(t *testing.T) {
 	}
 }
 
+// Rows as /interface/print answers on a CRS305-1G-4S+ (RouterOS 7.25, MACs
+// removed). The counters are already in the reply, so the boca must carry them:
+// the server turns them into per-port rates with the #305 delta, and without
+// them the port panel has no traffic at all.
+func TestRouterOSPortsCarryThePrintedCounters(t *testing.T) {
+	rows := []map[string]string{
+		{"name": "ether1", "type": "ether", "mtu": "9000", "running": "false", "rx-byte": "0", "tx-byte": "0"},
+		{"name": "sfp-sfpplus1", "type": "ether", "mtu": "9000", "running": "true", "rx-byte": "440039183288", "tx-byte": "1276962993224"},
+		{"name": "sfp-sfpplus2", "type": "ether", "mtu": "9000", "running": "true", "rx-byte": "1257648697875", "tx-byte": "428475245997"},
+		{"name": "sfp-sfpplus3", "type": "ether", "running": "false", "rx-byte": "0", "tx-byte": "0"},
+		{"name": "bridge", "type": "bridge", "running": "true", "rx-byte": "999", "tx-byte": "888"},
+	}
+	ports := routerOSPorts(rows)
+	if len(ports) != 4 {
+		t.Fatalf("ports = %d, want 4 (physical ether only)", len(ports))
+	}
+	if ports[1].RxBytes != 440039183288 || ports[1].TxBytes != 1276962993224 {
+		t.Fatalf("sfp-sfpplus1 counters = %d/%d", ports[1].RxBytes, ports[1].TxBytes)
+	}
+	if ports[2].RxBytes != 1257648697875 || ports[2].TxBytes != 428475245997 {
+		t.Fatalf("sfp-sfpplus2 counters = %d/%d", ports[2].RxBytes, ports[2].TxBytes)
+	}
+	if ports[0].RxBytes != 0 || ports[0].Speed != "" {
+		t.Fatalf("a down port carries no counters and no speed: %+v", ports[0])
+	}
+
+	netIf := routerOSNetIf(rows)
+	if len(netIf) != 2 {
+		t.Fatalf("netIf = %+v, want the two ports with traffic", netIf)
+	}
+	if netIf["sfp-sfpplus1"].Rx != 440039183288 || netIf["sfp-sfpplus2"].Tx != 428475245997 {
+		t.Fatalf("netIf counters = %+v", netIf)
+	}
+	if _, ok := netIf["bridge"]; ok {
+		t.Fatal("the bridge is not a boca; only the reported ports belong in netIf")
+	}
+}
+
 func TestRouterOSLeasesAndArpUseUpperMAC(t *testing.T) {
 	leases := routerOSLeases([]map[string]string{
 		{"mac-address": "aa:bb:cc:dd:ee:ff", "address": "192.168.1.20", "host-name": "laptop"},

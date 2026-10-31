@@ -657,6 +657,9 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		MACs:  map[string]string{},
 		Ports: routerOSPorts(ifRows),
 	}
+	// #305 contract: the payload carries absolute counters per iface and the
+	// server does the delta, which is what turns a boca into a rate.
+	data.NetIf = routerOSNetIf(ifRows)
 	leaseRows, err := conn.queryRows("/ip/dhcp-server/lease/print")
 	if err != nil {
 		return nil, err
@@ -789,14 +792,42 @@ func routerOSPorts(rows []map[string]string) []probe.EthPort {
 			continue
 		}
 		name := row["name"]
+		rx, _ := strconv.ParseUint(row["rx-byte"], 10, 64)
+		tx, _ := strconv.ParseUint(row["tx-byte"], 10, 64)
 		ports = append(ports, probe.EthPort{
-			ID:    name,
-			Label: name,
-			Up:    row["running"] == "true",
-			Iface: name,
+			ID:      name,
+			Label:   name,
+			Up:      row["running"] == "true",
+			Iface:   name,
+			RxBytes: rx,
+			TxBytes: tx,
+			// Speed stays empty on purpose: RouterOS keeps the negotiated
+			// rate in /interface/ethernet, and that menu never answers over
+			// the binary API (it does not even trap; it just stops replying).
 		})
 	}
 	return ports
+}
+
+// routerOSNetIf mirrors the same absolute counters as #305 expects: the
+// payload carries counters, the server does the delta between pushes.
+func routerOSNetIf(rows []map[string]string) map[string]probe.IfCounters {
+	var out map[string]probe.IfCounters
+	for _, row := range rows {
+		if row["type"] != "ether" {
+			continue
+		}
+		rx, _ := strconv.ParseUint(row["rx-byte"], 10, 64)
+		tx, _ := strconv.ParseUint(row["tx-byte"], 10, 64)
+		if rx == 0 && tx == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[string]probe.IfCounters{}
+		}
+		out[row["name"]] = probe.IfCounters{Rx: rx, Tx: tx}
+	}
+	return out
 }
 
 func routerOSLeases(rows []map[string]string) []probe.DhcpLease {

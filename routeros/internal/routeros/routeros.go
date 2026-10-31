@@ -37,6 +37,10 @@ type Config struct {
 	Password string
 	Insecure bool
 	Timeout  time.Duration
+	// APIPort overrides the binary API port. The zero value keeps the
+	// conventional 8728. It exists so tests can point the poller at a fake
+	// API server on a free port.
+	APIPort int
 }
 
 // Poller owns the previous WAN counters so rates survive between polls.
@@ -65,7 +69,8 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if restErr == nil {
 		return restData, nil
 	}
-	return nil, fmt.Errorf("routeros api: %v; rest: %w", apiErr, restErr)
+	// Keep both causes unwrappable so callers can classify either failure.
+	return nil, fmt.Errorf("routeros api: %w; rest: %w", apiErr, restErr)
 }
 
 type routerOSResource struct {
@@ -186,18 +191,37 @@ func fetchREST(ctx context.Context, client *http.Client, base, user, pass, path 
 }
 
 type routerOSAPIConn struct {
-	conn net.Conn
-	r    *bufio.Reader
+	conn    net.Conn
+	r       *bufio.Reader
+	timeout time.Duration
 }
 
-func dialRouterOSAPI(ctx context.Context, host, user, pass string, timeout time.Duration) (*routerOSAPIConn, error) {
+// maxRouterOSWordLen caps the word length the client accepts. The wire format
+// allows announcing up to 4 GiB per word (0xF0 prefix followed by a uint32
+// length, per the RouterOS API protocol specification), but words in replies
+// to the print queries this poller sends are attribute pairs of a few hundred
+// bytes at most. An announcement above the cap means a corrupted or hostile
+// peer: the word is never buffered and the connection is dropped.
+const maxRouterOSWordLen = 1 << 20
+
+// ProtocolError marks a framing or protocol violation by the RouterOS
+// endpoint. The session is unusable and the connection is closed, but the
+// condition is not terminal: the next poll cycle retries it.
+type ProtocolError struct{ message string }
+
+func (e *ProtocolError) Error() string { return e.message }
+
+func protocolErrorf(format string, args ...any) *ProtocolError {
+	return &ProtocolError{message: fmt.Sprintf(format, args...)}
+}
+
+func dialRouterOSAPI(ctx context.Context, host, port, user, pass string, timeout time.Duration) (*routerOSAPIConn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "8728"))
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
 	if err != nil {
 		return nil, err
 	}
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-	c := &routerOSAPIConn{conn: conn, r: bufio.NewReader(conn)}
+	c := &routerOSAPIConn{conn: conn, r: bufio.NewReader(conn), timeout: timeout}
 	if err := c.writeSentence("/login", "=name="+user, "=password="+pass); err != nil {
 		conn.Close()
 		return nil, err
@@ -215,6 +239,29 @@ func dialRouterOSAPI(ctx context.Context, host, user, pass string, timeout time.
 }
 
 func (c *routerOSAPIConn) Close() { _ = c.conn.Close() }
+
+// queryRows runs one query and wraps any failure with the command name, so a
+// failed poll names the query that broke it.
+func (c *routerOSAPIConn) queryRows(cmd string) ([]map[string]string, error) {
+	rows, err := c.query(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("query %s: %w", cmd, err)
+	}
+	return rows, nil
+}
+
+// beforeRead restarts the read timeout ahead of every read. A deadline per
+// read instead of one for the whole session lets a long poll with many slow
+// queries finish, while a read that stalls for a full timeout still fails
+// instead of hanging the poller.
+func (c *routerOSAPIConn) beforeRead() error {
+	return c.conn.SetReadDeadline(time.Now().Add(c.timeout))
+}
+
+// beforeWrite restarts the write timeout ahead of every sentence.
+func (c *routerOSAPIConn) beforeWrite() error {
+	return c.conn.SetWriteDeadline(time.Now().Add(c.timeout))
+}
 
 func (c *routerOSAPIConn) query(cmd string) ([]map[string]string, error) {
 	if err := c.writeSentence(cmd); err != nil {
@@ -248,6 +295,9 @@ func (c *routerOSAPIConn) query(cmd string) ([]map[string]string, error) {
 }
 
 func (c *routerOSAPIConn) writeSentence(words ...string) error {
+	if err := c.beforeWrite(); err != nil {
+		return err
+	}
 	for _, w := range words {
 		if err := writeRouterOSWord(c.conn, w); err != nil {
 			return err
@@ -259,7 +309,7 @@ func (c *routerOSAPIConn) writeSentence(words ...string) error {
 func (c *routerOSAPIConn) readSentence() ([]string, error) {
 	var words []string
 	for {
-		w, err := readRouterOSWord(c.r)
+		w, err := c.readWord()
 		if err != nil {
 			return nil, err
 		}
@@ -268,6 +318,13 @@ func (c *routerOSAPIConn) readSentence() ([]string, error) {
 		}
 		words = append(words, w)
 	}
+}
+
+func (c *routerOSAPIConn) readWord() (string, error) {
+	if err := c.beforeRead(); err != nil {
+		return "", err
+	}
+	return readRouterOSWord(c.r)
 }
 
 func writeRouterOSWord(w io.Writer, word string) error {
@@ -310,6 +367,9 @@ func readRouterOSWord(r *bufio.Reader) (string, error) {
 	if l == 0 {
 		return "", nil
 	}
+	if l > maxRouterOSWordLen {
+		return "", protocolErrorf("routeros api: announced word length %d exceeds the %d byte limit", l, maxRouterOSWordLen)
+	}
 	buf := make([]byte, l)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", err
@@ -350,25 +410,29 @@ func readRouterOSLen(r *bufio.Reader) (int, error) {
 		}
 		return int(binary.BigEndian.Uint32(b)), nil
 	default:
-		return 0, fmt.Errorf("routeros api: invalid length prefix 0x%02x", c0)
+		return 0, protocolErrorf("routeros api: reserved length prefix 0x%02x", c0)
 	}
 }
 
 func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
-	conn, err := dialRouterOSAPI(ctx, apiHost(p.cfg.Host), p.cfg.User, p.cfg.Password, p.cfg.Timeout)
+	port := "8728"
+	if p.cfg.APIPort > 0 {
+		port = strconv.Itoa(p.cfg.APIPort)
+	}
+	conn, err := dialRouterOSAPI(ctx, apiHost(p.cfg.Host), port, p.cfg.User, p.cfg.Password, p.cfg.Timeout)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	resRows, err := conn.query("/system/resource/print")
+	resRows, err := conn.queryRows("/system/resource/print")
 	if err != nil {
 		return nil, err
 	}
 	if len(resRows) == 0 {
 		return nil, fmt.Errorf("routeros api: no rows from /system/resource/print")
 	}
-	idRows, err := conn.query("/system/identity/print")
+	idRows, err := conn.queryRows("/system/identity/print")
 	if err != nil {
 		return nil, err
 	}
@@ -392,35 +456,48 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 	}
 	sys := data.System
 
-	var ifRows []map[string]string
-	if rows, err := conn.query("/interface/print"); err == nil {
-		ifRows = rows
-		sys.BridgeMAC = routerOSBridgeMAC(rows)
-		data.FDB = &probe.FDBData{
-			MACs:  map[string]string{},
-			Ports: routerOSPorts(rows),
-		}
+	// Every query must succeed before the payload is returned. Silently
+	// skipping a failed query used to push a partial payload that dropped
+	// whole sections; a failed poll stays retryable and pushes nothing
+	// instead.
+	ifRows, err := conn.queryRows("/interface/print")
+	if err != nil {
+		return nil, err
 	}
-	if rows, err := conn.query("/ip/dhcp-server/lease/print"); err == nil {
-		data.DHCP = &probe.DHCPData{Leases: routerOSLeases(rows)}
+	sys.BridgeMAC = routerOSBridgeMAC(ifRows)
+	data.FDB = &probe.FDBData{
+		MACs:  map[string]string{},
+		Ports: routerOSPorts(ifRows),
 	}
-	if rows, err := conn.query("/ip/arp/print"); err == nil {
-		arp, stale := routerOSArp(rows)
-		data.Arp = arp
-		data.ArpStale = stale
+	leaseRows, err := conn.queryRows("/ip/dhcp-server/lease/print")
+	if err != nil {
+		return nil, err
 	}
-	if rows, err := conn.query("/interface/bridge/host/print"); err == nil {
-		if data.FDB == nil {
-			data.FDB = &probe.FDBData{MACs: map[string]string{}}
-		}
-		data.FDB.MACs = routerOSFDB(rows)
+	data.DHCP = &probe.DHCPData{Leases: routerOSLeases(leaseRows)}
+	arpRows, err := conn.queryRows("/ip/arp/print")
+	if err != nil {
+		return nil, err
 	}
-	if rows, err := conn.query("/system/health/print"); err == nil {
-		if temp := routerOSTemp(rows); temp > 0 {
-			sys.Temp = &temp
-		}
+	arp, stale := routerOSArp(arpRows)
+	data.Arp = arp
+	data.ArpStale = stale
+	bridgeHostRows, err := conn.queryRows("/interface/bridge/host/print")
+	if err != nil {
+		return nil, err
 	}
-	if cpuRows, err := conn.query("/system/resource/cpu/print"); err == nil && len(cpuRows) > 0 {
+	data.FDB.MACs = routerOSFDB(bridgeHostRows)
+	healthRows, err := conn.queryRows("/system/health/print")
+	if err != nil {
+		return nil, err
+	}
+	if temp := routerOSTemp(healthRows); temp > 0 {
+		sys.Temp = &temp
+	}
+	cpuRows, err := conn.queryRows("/system/resource/cpu/print")
+	if err != nil {
+		return nil, err
+	}
+	if len(cpuRows) > 0 {
 		sum := 0
 		for _, row := range cpuRows {
 			l, _ := strconv.Atoi(row["load"])
@@ -432,21 +509,34 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 	if hdd, _ := strconv.ParseFloat(rr["total-hdd-space"], 64); hdd > 0 {
 		sys.Flash = fmt.Sprintf("%.0f MB", hdd/1e6)
 	}
-	if rows, err := conn.query("/system/package/update/print"); err == nil {
-		sys.FirmwareAvailable = routerOSPackageUpdate(rows)
-		if sys.FirmwareAvailable == "" {
-			_ = conn.writeSentence("/system/package/update/check-for-updates")
-			if _, err := conn.readSentence(); err == nil {
-				if rowsAfter, err := conn.query("/system/package/update/print"); err == nil {
-					sys.FirmwareAvailable = routerOSPackageUpdate(rowsAfter)
-				}
-			}
-		}
+	updateRows, err := conn.queryRows("/system/package/update/print")
+	if err != nil {
+		return nil, err
 	}
-	if routeRows, err := conn.query("/ip/route/print"); err == nil {
-		if wanIface := routerOSWANInterface(routeRows); wanIface != "" {
-			sys.RxBps, sys.TxBps = p.netRate(ifRows, wanIface)
+	sys.FirmwareAvailable = routerOSPackageUpdate(updateRows)
+	if sys.FirmwareAvailable == "" {
+		// The update check is a command exchange whose reply must be
+		// consumed before the next query. A failure here desyncs the
+		// stream, so it fails the poll like any other query instead of
+		// being swallowed.
+		if err := conn.writeSentence("/system/package/update/check-for-updates"); err != nil {
+			return nil, fmt.Errorf("query /system/package/update/check-for-updates: %w", err)
 		}
+		if _, err := conn.readSentence(); err != nil {
+			return nil, fmt.Errorf("query /system/package/update/check-for-updates: %w", err)
+		}
+		rowsAfter, err := conn.queryRows("/system/package/update/print")
+		if err != nil {
+			return nil, err
+		}
+		sys.FirmwareAvailable = routerOSPackageUpdate(rowsAfter)
+	}
+	routeRows, err := conn.queryRows("/ip/route/print")
+	if err != nil {
+		return nil, err
+	}
+	if wanIface := routerOSWANInterface(routeRows); wanIface != "" {
+		sys.RxBps, sys.TxBps = p.netRate(ifRows, wanIface)
 	}
 	return data, nil
 }

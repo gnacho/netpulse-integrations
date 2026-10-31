@@ -15,6 +15,7 @@ import (
 
 	"github.com/gnacho/netpulse-integrations/asuswrt"
 	"github.com/gnacho/netpulse-integrations/bbox"
+	"github.com/gnacho/netpulse-integrations/fn"
 	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse-integrations/internal/supervisor"
 	"github.com/gnacho/netpulse-integrations/opnsense"
@@ -50,6 +51,12 @@ type integration struct {
 	APITLS bool   `json:"api_tls,omitempty"`
 	CACert string `json:"ca_cert,omitempty"`
 	CertFP string `json:"cert_fp,omitempty"`
+	// Fn/Realtek switch settings. SSHHostFP pins the CLI host key; NoCLI
+	// skips the CLI channel, which is where temperature and RAM come from.
+	// cert_fp pins that vendor's web certificate (SPKI) too. Other vendors
+	// ignore these.
+	SSHHostFP string `json:"ssh_host_fp,omitempty"`
+	NoCLI     bool   `json:"no_cli,omitempty"`
 }
 
 func main() {
@@ -158,6 +165,17 @@ func buildPollers(entries []integration, defaultVersion string, logger *slog.Log
 			item.Collect = poller.Poll
 		case "unifi":
 			poller := unifi.New(unifi.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Site: entry.Site, Insecure: entry.Insecure})
+			item.Collect = poller.Poll
+		case "fn":
+			poller := fn.New(fn.Config{
+				Host:     entry.Host,
+				User:     entry.User,
+				Password: entry.Password,
+				Insecure: entry.Insecure,
+				CertFP:   entry.CertFP,
+				HostFP:   entry.SSHHostFP,
+				NoCLI:    entry.NoCLI,
+			}, logger)
 			item.Collect = poller.Poll
 		case "asuswrt":
 			collector := asuswrt.NewCollector(probe.ShellRunner{}, item.Slug, item.Version)

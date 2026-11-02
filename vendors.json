@@ -19,6 +19,15 @@
       "description": "Read-only Bouygues Bbox poller shipped inside the shared integrations supervisor binary"
     },
     {
+      "id": "opnsense",
+      "mode": "local",
+      "arches": ["amd64", "arm64"],
+      "tagPrefix": "opnsense/v",
+      "binary": "opnsense-pusher",
+      "target": "opnsense/cmd/opnsense-pusher",
+      "description": "Beta read-only OPNsense API pusher for system data, interface counters, ARP and explicitly configured WAN rates"
+    },
+    {
       "id": "routeros",
       "mode": "local",
       "arches": ["amd64"],

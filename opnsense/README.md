@@ -1,8 +1,6 @@
-# OPNsense read-only pusher: documentation-only draft
+# OPNsense read-only pusher
 
-Status: experimental vertical slice. This integration has not been run against OPNsense hardware or a virtual appliance. It is intentionally absent from `vendors.json`, release packaging and the integration installer. Do not describe it as supported yet.
-
-The implementation is based on the official OPNsense API documentation and the response shapes in the official OPNsense Core source. Synthetic fixtures exercise the HTTP client and the conversion to the neutral NetPulse payload. Real response captures are still required before release.
+Status: **beta, pending validation on a real OPNsense system**. The implementation is based on the official OPNsense API documentation and response shapes in the official OPNsense Core source. Synthetic fixtures exercise the HTTP client, both delivery modes and the conversion to the neutral NetPulse payload. Beta packaging makes the integration available for testing; it does not claim stable support yet.
 
 ## Implemented coverage
 
@@ -10,15 +8,16 @@ The implementation is based on the official OPNsense API documentation and the r
 - System hostname, product version, release description and target architecture from `system_information`.
 - Per-interface cumulative RX/TX bytes and packet errors from `get_interface_statistics`, exposed as `netIf`.
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
-- Optional WAN RX/TX rates from counter deltas when `wan_interface` explicitly selects an interface.
+- Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
-- Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable by the supervisor.
+- Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable.
+- A standalone `opnsense-pusher` for the NetPulse managed installer, plus registration in the shared integrations supervisor.
 
 All requests use GET. The integration does not write OPNsense configuration, install firmware or perform upgrades.
 
 ## Deliberate omissions and unresolved behavior
 
-- No interface is assumed to be WAN. Without `wan_interface`, WAN metadata and traffic rates are omitted.
+- No interface is assumed to be WAN. Without explicit selection, WAN metadata and traffic rates are omitted.
 - The first WAN poll establishes a counter baseline and emits no rate. Counter resets also emit no rate for that sample.
 - Link state, negotiated speed and WAN IP/gateway/DNS are not inferred from interface statistics.
 - NDP/IPv6 neighbor data is not mixed into the IPv4-only ARP payload.
@@ -26,9 +25,47 @@ All requests use GET. The integration does not write OPNsense configuration, ins
 - Exact effective privileges for an unprivileged OPNsense API user still need verification.
 - Counter decoding currently requires the quoted decimal form used by the synthetic netstat fixture. Unquoted numeric variants, if found on a real system, need fixtures and an explicit compatibility decision.
 
-## Draft supervisor configuration
+## Managed NetPulse installation
 
-Add an object to the shared supervisor `integrations` array only in a local test environment:
+The catalog entry installs the standalone binary on the NetPulse host. The current generic managed installer supplies the host, API key and API secret, but it does not expose a WAN interface, CA file or certificate pin.
+
+Two beta limitations follow from that existing installer contract:
+
+- It sets `OPNSENSE_INSECURE=1`, so verification of the OPNsense certificate is disabled. Use this mode only on a trusted network during the beta.
+- It does not set `OPNSENSE_WAN_INTERFACE`, so WAN rates are omitted. System data, interface counters and ARP are still collected.
+
+For authenticated TLS or WAN rates, use the standalone environment or shared supervisor configuration below.
+
+## Standalone configuration
+
+```sh
+export OPNSENSE_HOST=https://opnsense.example
+export OPNSENSE_USER=REPLACE_WITH_API_KEY
+export OPNSENSE_PASS=REPLACE_WITH_API_SECRET
+export OPNSENSE_CA_CERT=/etc/netpulse/opnsense-ca.pem
+export OPNSENSE_WAN_INTERFACE=em0
+export NETPULSE_SERVER=http://netpulse.example:3000
+export NETPULSE_TOKEN=REPLACE_WITH_EXTERNAL_AGENT_TOKEN
+export NETPULSE_SLUG=opnsense-lab
+export NETPULSE_INTERVAL=60s
+./opnsense-pusher
+```
+
+`OPNSENSE_HOST` accepts a hostname, IP or HTTPS base URL. Plain HTTP is not accepted. `OPNSENSE_USER` is the API key and `OPNSENSE_PASS` is its secret. The secret is displayed only once when the key is created.
+
+TLS trust options for the OPNsense connection:
+
+| Variable | Meaning |
+|---|---|
+| `OPNSENSE_CA_CERT` | Path to a PEM file containing the CA that signed the firewall certificate, added to the system roots |
+| `OPNSENSE_CERT_FP` | One SHA-256 fingerprint, 64 hexadecimal characters, of the full leaf certificate |
+| `OPNSENSE_INSECURE=1` | Skips certificate verification as an explicit last-resort opt-out |
+
+`OPNSENSE_CA_CERT` and `OPNSENSE_CERT_FP` are mutually exclusive. With neither, normal system-root and hostname verification applies. These options cover only the connection to OPNsense. For an HTTPS NetPulse destination, the existing `NETPULSE_SERVER_FP` variable pins the NetPulse server SPKI.
+
+## Shared supervisor configuration
+
+Add an object to the supervisor `integrations` array:
 
 ```json
 {
@@ -45,19 +82,7 @@ Add an object to the shared supervisor `integrations` array only in a local test
 }
 ```
 
-`host` accepts a hostname, IP or HTTPS base URL. Plain HTTP is not accepted. `user` is the OPNsense API key and `password` is its secret. The secret is displayed only once when the key is created.
-
-TLS trust options for the OPNsense connection:
-
-| Field | Meaning |
-|---|---|
-| `ca_cert` | PEM file containing the CA that signed the firewall certificate, added to the system roots |
-| `cert_fp` | One SHA-256 fingerprint, 64 hexadecimal characters, of the full leaf certificate |
-| `insecure` | `true` skips certificate verification and is an explicit last-resort opt-out |
-
-`ca_cert` and `cert_fp` are mutually exclusive. With neither, normal system-root and hostname verification applies. These options cover only the connection to OPNsense, not the connection from the supervisor to NetPulse.
-
-Keep the supervisor configuration readable only by its service account. It contains the API secret and the NetPulse agent token.
+The supervisor uses `cert_fp` with the same meaning as `OPNSENSE_CERT_FP`. Keep its configuration readable only by its service account because it contains the API secret and NetPulse agent token.
 
 ## Local verification
 
@@ -70,7 +95,7 @@ go vet ./...
 
 The tests use `httptest` TLS servers and synthetic fixtures under `opnsense/internal/opnsense/testdata`. They do not contact an OPNsense system.
 
-## Evidence needed before release
+## Evidence needed before leaving beta
 
 1. Run against a supported OPNsense version with a dedicated read-only API user.
 2. Capture sanitized responses for system information, interface statistics and ARP, including interface counter values and content types.
@@ -78,8 +103,6 @@ The tests use `httptest` TLS servers and synthetic fixtures under `opnsense/inte
 4. Verify counter units, counter reset behavior, WAN rate signs and interface names over several polls.
 5. Decide from evidence whether NDP, link state, DHCP or WAN address data can be represented without guessing.
 6. Add compatibility fixtures for every observed response variant.
-
-Only after that validation should the integration receive a `README.md`, catalog metadata, installer wiring or release packaging.
 
 ## Official sources
 

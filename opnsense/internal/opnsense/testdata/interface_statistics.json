@@ -1,0 +1,24 @@
+{
+  "statistics": {
+    "[WAN] (em0) / 192.0.2.2": {
+      "name": "em0",
+      "address": "192.0.2.2",
+      "received-packets": "9000",
+      "received-errors": "0",
+      "received-bytes": "4500000000",
+      "sent-packets": "7000",
+      "sent-errors": "0",
+      "sent-bytes": "900000000"
+    },
+    "[LAN] (em1) / 192.168.1.1": {
+      "name": "em1",
+      "address": "192.168.1.1",
+      "received-packets": "12",
+      "received-errors": "3",
+      "received-bytes": "1000",
+      "sent-packets": "10",
+      "sent-errors": "4",
+      "sent-bytes": "2000"
+    }
+  }
+}

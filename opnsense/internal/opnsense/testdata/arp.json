@@ -1,0 +1,19 @@
+{
+  "rows": [
+    {
+      "mac": "aa:bb:cc:dd:ee:01",
+      "ip": "192.168.1.50",
+      "intf": "em1",
+      "expired": false,
+      "expires": 60,
+      "permanent": false,
+      "type": "ethernet",
+      "manufacturer": "Example Devices",
+      "hostname": "laptop.test",
+      "intf_description": "LAN"
+    }
+  ],
+  "rowCount": 1,
+  "total": 1,
+  "current": 1
+}

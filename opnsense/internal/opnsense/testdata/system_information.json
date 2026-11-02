@@ -1,0 +1,9 @@
+{
+  "name": "opnsense.test",
+  "versions": [
+    "OPNsense 25.7 (amd64)",
+    "FreeBSD 14.2-RELEASE-p1",
+    "OpenSSL 3.0.16"
+  ],
+  "updates": 0
+}

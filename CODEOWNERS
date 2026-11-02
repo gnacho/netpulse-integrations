@@ -4,5 +4,6 @@
 # Each integration directory has the person who can test the hardware.
 /routeros/ @gnacho
 /asuswrt/ @gnacho
+/opnsense/ @gnacho
 
 /bbox/ @juflo

@@ -12,6 +12,7 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 |---|---|---|
 | `routeros/` | RouterOS binary API on port 8728, REST fallback | RouterOS 7+: system, Ethernet ports, DHCP, ARP, bridge FDB, temperature, flash, firmware state and WAN rates |
 | `bbox/` | Bbox local HTTPS API | System, WAN, active hosts and Ethernet port rates |
+| `opnsense/` | OPNsense HTTPS API, read-only, **beta** | System, interface counters, IPv4 ARP and WAN rates with an explicitly selected interface; real-system validation pending |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 | `unifi/` | UniFi controller REST API, read-only | Gateways, switches and APs of one site: FDB ports and uplink attachments, wireless clients, ARP identities and gateway uptime |
 
@@ -95,10 +96,10 @@ arm64.
 1. Open an issue in the NetPulse repository with the router model, firmware, API documentation, available data and a read-only first scope.
 2. Add a directory named after the family, with `README.md` and `CHANGELOG.md`; keep its poller and vendor-specific details inside that directory.
 3. Add a poller constructor to the shared supervisor. Keep vendor credentials and parsing inside that directory. Ask NetPulse maintainers for neutral contract fields before depending on them.
-4. Include fixtures, tests and evidence from real hardware.
+4. Include fixtures and tests. Real-hardware evidence is required before stable support; a docs-based beta must say so explicitly and list its unverified behavior.
 5. Add a `CODEOWNERS` entry for the directory. The owner of the hardware maintains it and validates releases.
 6. Add an entry to [`vendors.json`](vendors.json) with the release values and a short description. CI validates the catalog against the release workflow and fails on drift.
-7. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before tagging.
+7. Tag releases per integration, for example `routeros/v0.1.0`. The release workflow tests the repository and publishes the documented platform asset. Validate the integration on real hardware before calling it stable. A beta tag for community validation must be labeled beta in the catalog and documentation, with its limitations and evidence gaps stated.
 
 The maintainer of this repository decides who owns each directory. Directory ownership is not transferred by sending a pull request.
 

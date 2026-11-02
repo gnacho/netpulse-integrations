@@ -33,6 +33,22 @@ func TestRunRejectsDuplicateSlugs(t *testing.T) {
 	}
 }
 
+func TestBuildPollersRegistersOPNsense(t *testing.T) {
+	pollers, err := buildPollers([]integration{{
+		Type: "opnsense", Slug: "gw", Token: "token", Host: "opnsense.test",
+		User: "api-key", Password: "api-secret", WANInterface: "em0", Insecure: true,
+	}}, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pollers) != 1 {
+		t.Fatalf("pollers = %d, want 1", len(pollers))
+	}
+	if pollers[0].Vendor != "opnsense" || pollers[0].Collect == nil {
+		t.Fatalf("OPNsense supervisor poller = %+v", pollers[0])
+	}
+}
+
 func writeConfig(t *testing.T, cfg fileConfig) string {
 	t.Helper()
 	data, err := json.Marshal(cfg)

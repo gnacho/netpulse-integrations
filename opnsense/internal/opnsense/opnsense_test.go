@@ -1,0 +1,234 @@
+package opnsense
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func serveFixture(t *testing.T, w http.ResponseWriter, name string) {
+	t.Helper()
+	encoded, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Errorf("read fixture %s: %v", name, err)
+		http.Error(w, "fixture unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(encoded)
+}
+
+func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		key, secret, ok := r.BasicAuth()
+		if !ok || key != "test-key" || secret != "test-secret" {
+			t.Errorf("unexpected Basic Auth credentials")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/core/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/core/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics.json")
+		case "/api/core/diagnostics/interface/search_arp":
+			serveFixture(t, w, "arp.json")
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{
+		Host:      server.URL,
+		APIKey:    "test-key",
+		APISecret: "test-secret",
+		Insecure:  true,
+	})
+	data, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if data.System == nil || data.System.Board == nil {
+		t.Fatal("system board is missing")
+	}
+	board := data.System.Board
+	if board.Hostname != "opnsense.test" || board.System != "opnsense" || board.Model != "OPNsense" {
+		t.Errorf("unexpected board identity: %+v", board)
+	}
+	if board.Release.Version != "25.7" || board.Release.Target != "amd64" {
+		t.Errorf("unexpected release: %+v", board.Release)
+	}
+	if got := data.NetIf["em0"]; got.Rx != 4500000000 || got.Tx != 900000000 || got.RxErr != 0 || got.TxErr != 0 {
+		t.Errorf("em0 counters = %+v", got)
+	}
+	if got := data.NetIf["em1"]; got.Rx != 1000 || got.Tx != 2000 || got.RxErr != 3 || got.TxErr != 4 {
+		t.Errorf("em1 counters = %+v", got)
+	}
+	mac := "AA:BB:CC:DD:EE:01"
+	if data.Arp[mac] != "192.168.1.50" || data.ArpDevs[mac] != "em1" {
+		t.Errorf("ARP = %v, devices = %v", data.Arp, data.ArpDevs)
+	}
+	if data.FDB != nil || data.Wan != nil || data.System.RxBps != nil || data.System.TxBps != nil {
+		t.Errorf("payload contains inferred data: FDB=%+v WAN=%+v RX=%v TX=%v", data.FDB, data.Wan, data.System.RxBps, data.System.TxBps)
+	}
+}
+
+func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
+	var rx, tx uint64 = 4500000000, 900000000
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/core/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/core/diagnostics/interface/get_interface_statistics":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"statistics":{"[WAN] (em0) / 192.0.2.2":{"name":"em0","received-bytes":"%d","sent-bytes":"%d","received-errors":"0","sent-errors":"0"}}}`, rx, tx)
+		case "/api/core/diagnostics/interface/search_arp":
+			serveFixture(t, w, "arp.json")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true, WANInterface: "em0"})
+	now := time.Unix(1000, 0)
+	poller.now = func() time.Time { return now }
+	first, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("first Poll: %v", err)
+	}
+	if first.Wan == nil || first.Wan.Device != "em0" || first.Wan.Port != "em0" {
+		t.Fatalf("explicit WAN identity = %+v", first.Wan)
+	}
+	if first.System.RxBps != nil || first.System.TxBps != nil {
+		t.Fatalf("first sample invented rates: RX=%v TX=%v", first.System.RxBps, first.System.TxBps)
+	}
+
+	rx += 1000
+	tx += 500
+	now = now.Add(2 * time.Second)
+	second, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("second Poll: %v", err)
+	}
+	if second.System.RxBps == nil || *second.System.RxBps != 4000 || second.System.TxBps == nil || *second.System.TxBps != 2000 {
+		t.Fatalf("delta rates: RX=%v TX=%v, want 4000/2000", second.System.RxBps, second.System.TxBps)
+	}
+
+	rx = 100
+	tx = 50
+	now = now.Add(2 * time.Second)
+	reset, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("reset Poll: %v", err)
+	}
+	if reset.System.RxBps != nil || reset.System.TxBps != nil {
+		t.Fatalf("counter reset invented rates: RX=%v TX=%v", reset.System.RxBps, reset.System.TxBps)
+	}
+
+	rx += 250
+	tx += 125
+	now = now.Add(time.Second)
+	afterReset, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("after-reset Poll: %v", err)
+	}
+	if afterReset.System.RxBps == nil || *afterReset.System.RxBps != 2000 || afterReset.System.TxBps == nil || *afterReset.System.TxBps != 1000 {
+		t.Fatalf("post-reset baseline was not restored: RX=%v TX=%v", afterReset.System.RxBps, afterReset.System.TxBps)
+	}
+}
+
+func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/core/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/core/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics.json")
+		case "/api/core/diagnostics/interface/search_arp":
+			serveFixture(t, w, "arp.json")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatalf("write CA: %v", err)
+	}
+	sum := sha256.Sum256(server.Certificate().Raw)
+	fingerprint := hex.EncodeToString(sum[:])
+
+	for _, test := range []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "CA", cfg: Config{CACert: caFile}},
+		{name: "certificate fingerprint", cfg: Config{CertFP: fingerprint}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.cfg.Host = server.URL
+			test.cfg.APIKey = "key"
+			test.cfg.APISecret = "secret"
+			if _, err := New(test.cfg).Poll(context.Background()); err != nil {
+				t.Fatalf("Poll with configured trust: %v", err)
+			}
+		})
+	}
+
+	t.Run("conflicting trust", func(t *testing.T) {
+		poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", CACert: caFile, CertFP: fingerprint})
+		_, err := poller.Poll(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("conflicting TLS trust error = %v", err)
+		}
+	})
+}
+
+func TestPollClassifiesAuthenticationAndServerErrors(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		auth   bool
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, auth: true},
+		{name: "forbidden", status: http.StatusForbidden, auth: true},
+		{name: "server error", status: http.StatusInternalServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "request rejected", test.status)
+			}))
+			defer server.Close()
+			poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+			_, err := poller.Poll(context.Background())
+			if err == nil {
+				t.Fatal("Poll succeeded despite HTTP error")
+			}
+			var authErr *AuthenticationError
+			if got := errors.As(err, &authErr); got != test.auth {
+				t.Fatalf("AuthenticationError match = %v, want %v: %v", got, test.auth, err)
+			}
+			if terminal, ok := err.(interface{ Terminal() bool }); ok && terminal.Terminal() != test.auth {
+				t.Fatalf("Terminal() = %v, want %v", terminal.Terminal(), test.auth)
+			}
+		})
+	}
+}

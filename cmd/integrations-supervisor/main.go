@@ -17,6 +17,7 @@ import (
 	"github.com/gnacho/netpulse-integrations/bbox"
 	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse-integrations/internal/supervisor"
+	"github.com/gnacho/netpulse-integrations/opnsense"
 	"github.com/gnacho/netpulse-integrations/routeros"
 	"github.com/gnacho/netpulse-integrations/unifi"
 	"github.com/gnacho/netpulse/agent/probe"
@@ -33,20 +34,19 @@ type fileConfig struct {
 }
 
 type integration struct {
-	Type     string `json:"type"`
-	Slug     string `json:"slug"`
-	Token    string `json:"token"`
-	Version  string `json:"version,omitempty"`
-	Interval string `json:"interval,omitempty"`
-	Host     string `json:"host"`
-	User     string `json:"user,omitempty"`
-	Password string `json:"password"`
-	Insecure bool   `json:"insecure,omitempty"`
-	Site     string `json:"site,omitempty"`
-	// RouterOS TLS trust settings. APITLS dials the binary API over TLS
-	// (api-ssl, port 8729); CACert and CertFP authenticate the router
-	// certificate for that connection and for https REST. Other vendors
-	// ignore them.
+	Type         string `json:"type"`
+	Slug         string `json:"slug"`
+	Token        string `json:"token"`
+	Version      string `json:"version,omitempty"`
+	Interval     string `json:"interval,omitempty"`
+	Host         string `json:"host"`
+	User         string `json:"user,omitempty"`
+	Password     string `json:"password"`
+	Insecure     bool   `json:"insecure,omitempty"`
+	Site         string `json:"site,omitempty"`
+	WANInterface string `json:"wan_interface,omitempty"`
+	// APITLS is RouterOS-only. CACert and CertFP authenticate RouterOS
+	// and OPNsense certificates. Other vendors ignore them.
 	APITLS bool   `json:"api_tls,omitempty"`
 	CACert string `json:"ca_cert,omitempty"`
 	CertFP string `json:"cert_fp,omitempty"`
@@ -95,27 +95,38 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	pollers := make([]supervisor.Poller, 0, len(cfg.Integrations))
-	seenSlugs := make(map[string]struct{}, len(cfg.Integrations))
-	for i, entry := range cfg.Integrations {
+	pollers, err := buildPollers(cfg.Integrations, version, logger)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return supervisor.Run(ctx, client, pollers, logger)
+}
+
+func buildPollers(entries []integration, defaultVersion string, logger *slog.Logger) ([]supervisor.Poller, error) {
+	pollers := make([]supervisor.Poller, 0, len(entries))
+	seenSlugs := make(map[string]struct{}, len(entries))
+	for i, entry := range entries {
 		slug := strings.TrimSpace(entry.Slug)
 		if slug == "" {
-			return fmt.Errorf("integration %d: slug is required", i)
+			return nil, fmt.Errorf("integration %d: slug is required", i)
 		}
 		if _, exists := seenSlugs[slug]; exists {
-			return fmt.Errorf("integration %d: duplicate slug %q", i, slug)
+			return nil, fmt.Errorf("integration %d: duplicate slug %q", i, slug)
 		}
 		seenSlugs[slug] = struct{}{}
 		interval := 60 * time.Second
+		var err error
 		if entry.Interval != "" {
 			interval, err = time.ParseDuration(entry.Interval)
 			if err != nil || interval < 10*time.Second || interval > 24*time.Hour || interval%time.Second != 0 {
-				return fmt.Errorf("integration %d: interval must be a whole-second duration between 10s and 24h", i)
+				return nil, fmt.Errorf("integration %d: interval must be a whole-second duration between 10s and 24h", i)
 			}
 		}
 		entryVersion := entry.Version
 		if entryVersion == "" {
-			entryVersion = version
+			entryVersion = defaultVersion
 		}
 		item := supervisor.Poller{Vendor: strings.ToLower(entry.Type), Slug: slug, Token: entry.Token,
 			Version: entryVersion, Interval: interval}
@@ -123,7 +134,7 @@ func run(path string, logger *slog.Logger) error {
 		case "bbox":
 			poller, err := bbox.New(bbox.Config{Host: entry.Host, Password: entry.Password, Insecure: entry.Insecure}, logger)
 			if err != nil {
-				return fmt.Errorf("integration %d (bbox): %w", i, err)
+				return nil, fmt.Errorf("integration %d (bbox): %w", i, err)
 			}
 			item.Collect = poller.Poll
 			item.Close = poller.Close
@@ -138,6 +149,13 @@ func run(path string, logger *slog.Logger) error {
 				CertFP:   entry.CertFP,
 			})
 			item.Collect = poller.Poll
+		case "opnsense":
+			poller := opnsense.New(opnsense.Config{
+				Host: entry.Host, APIKey: entry.User, APISecret: entry.Password,
+				Insecure: entry.Insecure, CACert: entry.CACert, CertFP: entry.CertFP,
+				WANInterface: entry.WANInterface,
+			})
+			item.Collect = poller.Poll
 		case "unifi":
 			poller := unifi.New(unifi.Config{Host: entry.Host, User: entry.User, Password: entry.Password, Site: entry.Site, Insecure: entry.Insecure})
 			item.Collect = poller.Poll
@@ -145,11 +163,9 @@ func run(path string, logger *slog.Logger) error {
 			collector := asuswrt.NewCollector(probe.ShellRunner{}, item.Slug, item.Version)
 			item.Collect = collector.CollectData
 		default:
-			return fmt.Errorf("integration %d: unsupported type %q", i, entry.Type)
+			return nil, fmt.Errorf("integration %d: unsupported type %q", i, entry.Type)
 		}
 		pollers = append(pollers, item)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return supervisor.Run(ctx, client, pollers, logger)
+	return pollers, nil
 }

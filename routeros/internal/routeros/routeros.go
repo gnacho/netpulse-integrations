@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -701,6 +702,12 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		return nil, err
 	}
 	sys.BridgeMAC = routerOSBridgeMAC(ifRows)
+	// #1765: the rest of the identities the box answers for. A CRS3xx carries
+	// one MAC per port on top of the bridge MAC, and a neighbour that learns
+	// one of them in its FDB lists it as an unknown client that never goes
+	// offline. The print already answers mac-address for every interface, so
+	// the list costs nothing extra and the server absorbs it as its own.
+	sys.IfaceMACs = routerOSIfaceMACs(ifRows)
 	samples, err := routerOSEtherSamples(ifRows)
 	if err != nil {
 		return nil, err
@@ -1179,6 +1186,30 @@ func routerOSBridgeMAC(rows []map[string]string) string {
 		}
 	}
 	return ""
+}
+
+// routerOSIfaceMACs collects the MAC of every interface the box answers for,
+// with the same normalization the native agent applies to its own list (#1765):
+// upper case, no duplicates, no null MAC, ordered, so the payload is stable
+// across polls and a changed list means a real change. VLANs, bridges and the
+// per-port identities come from the same print, and nothing is invented when a
+// row carries no mac-address at all.
+func routerOSIfaceMACs(rows []map[string]string) []string {
+	seen := make(map[string]bool, len(rows))
+	macs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		mac := strings.ToUpper(strings.TrimSpace(row["mac-address"]))
+		if len(mac) != 17 || mac == "00:00:00:00:00:00" || seen[mac] {
+			continue
+		}
+		seen[mac] = true
+		macs = append(macs, mac)
+	}
+	if len(macs) == 0 {
+		return nil
+	}
+	slices.Sort(macs)
+	return macs
 }
 
 func routerOSArp(rows []map[string]string) (map[string]string, []string) {

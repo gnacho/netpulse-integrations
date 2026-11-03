@@ -191,3 +191,30 @@ type nopWriteCloser struct{}
 
 func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (nopWriteCloser) Close() error                { return io.EOF }
+
+// A half counter sample is worse than no sample: the server diffs each push
+// against the previous one, so a fabricated zero would show up as a spike of
+// the full counter on the next poll (#35, #40).
+func TestOctetsRequiresBothCounters(t *testing.T) {
+	withBoth := portCntGroups{Cnts: []cntSection{{Cnts: []cntValue{
+		{Name: "ifInOctets", Val: 1226914633},
+		{Name: "ifOutOctets", Val: 7328650},
+	}}}}
+	if rx, tx, ok := octets(withBoth); !ok || rx != 1226914633 || tx != 7328650 {
+		t.Fatalf("both counters: rx=%d tx=%d ok=%v", rx, tx, ok)
+	}
+
+	for name, g := range map[string]portCntGroups{
+		"missing ifOutOctets": {Cnts: []cntSection{{Cnts: []cntValue{
+			{Name: "ifInOctets", Val: 1226914633},
+		}}}},
+		"missing ifInOctets": {Cnts: []cntSection{{Cnts: []cntValue{
+			{Name: "ifOutOctets", Val: 7328650},
+		}}}},
+		"no counters": {},
+	} {
+		if _, _, ok := octets(g); ok {
+			t.Fatalf("%s: ok=true, wanted no sample", name)
+		}
+	}
+}

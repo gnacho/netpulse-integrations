@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Require both `ifInOctets` and `ifOutOctets` before reporting a port sample:
+  a counter read on its own became a fabricated zero baseline, so the next
+  push showed a spike worth the whole counter.
+- Leave `Board.System` empty. The server renders that field as the SoC on the
+  router card, so the `fn-switch` class name used to show up as the chip.
 - Require `FN_SSH_HOSTKEY` (supervisor `ssh_host_fp`) whenever `FN_PASS` is set:
   the CLI login sends that password, so an unpinned host key was a credential
   going to whatever answered the port, while the web channel already fails

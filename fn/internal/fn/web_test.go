@@ -210,6 +210,9 @@ func TestPollAgainstTheCapturedFirmware(t *testing.T) {
 	if sys.Board.Release.Version != "V1.1.6-20260913-019" || sys.Board.Model != "FN SWITCH 8 PRO" {
 		t.Fatalf("board = %+v", sys.Board)
 	}
+	if sys.Board.System != "" {
+		t.Fatalf("Board.System = %q: the core renders it as the SoC, so the class name must not land there", sys.Board.System)
+	}
 	if want := 3*86400.0 + 5*3600 + 15*60 + 50; sys.SysInfo.Uptime != want {
 		t.Fatalf("uptime = %v, wanted %v read from the i18n arguments", sys.SysInfo.Uptime, want)
 	}

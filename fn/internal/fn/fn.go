@@ -221,7 +221,6 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 		Board: &probe.BoardInfo{
 			Model:     si.Model,
 			Hostname:  si.Hostname,
-			System:    "fn-switch",
 			BoardName: si.Model,
 		},
 	}
@@ -349,21 +348,22 @@ func buildPorts(pn panel, pc portCnts) []probe.EthPort {
 
 // octets pulls ifInOctets/ifOutOctets out of the counter groups. The group names
 // arrive as i18n keys ("lang('port','lblIntf')"), so the counters are found by
-// name without depending on the group.
+// name without depending on the group. Both counters are required: reporting a
+// half sample would store a fabricated zero as the baseline and turn the next
+// push into a spike of the full counter value.
 func octets(g portCntGroups) (rx, tx uint64, ok bool) {
+	var in, out bool
 	for _, section := range g.Cnts {
 		for _, c := range section.Cnts {
 			switch c.Name {
 			case "ifInOctets":
-				rx = uint64(c.Val)
-				ok = true
+				rx, in = uint64(c.Val), true
 			case "ifOutOctets":
-				tx = uint64(c.Val)
-				ok = true
+				tx, out = uint64(c.Val), true
 			}
 		}
 	}
-	return rx, tx, ok
+	return rx, tx, in && out
 }
 
 // speedLabel converts the panel's Mbps into the form the server parses

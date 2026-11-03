@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -269,6 +270,47 @@ func trustErrorf(format string, args ...any) *TrustError {
 	return &TrustError{message: fmt.Sprintf(format, args...)}
 }
 
+// TrapError marks a !trap reply: the command reached the router and was
+// refused. menuMissing says whether the refusal was "this menu/item does not
+// exist", which is how RouterOS answers for a board or a version that simply
+// does not have the feature. Callers use it to leave one section empty
+// instead of failing the whole poll.
+type TrapError struct {
+	message     string
+	menuMissing bool
+}
+
+func (e *TrapError) Error() string { return e.message }
+
+func trapErrorf(menuMissing bool, format string, args ...any) *TrapError {
+	return &TrapError{message: fmt.Sprintf(format, args...), menuMissing: menuMissing}
+}
+
+// isMenuMissing reports a refusal to talk about a menu the device does not
+// have, as opposed to a transport or protocol failure.
+func isMenuMissing(err error) bool {
+	var trap *TrapError
+	return errors.As(err, &trap) && trap.menuMissing
+}
+
+// menuMissingReply classifies a trap message. RouterOS spells the same "I do
+// not have that" answer several ways: an unknown directory ("/interface/switch"
+// on v7), an unknown sub-command prefix ("/interface/ethernet/poe" on a board
+// with no PoE) and an unknown row ("/interface/ethernet/monitor" for a .id
+// that vanished between the print and the monitor).
+func menuMissingReply(message string) bool {
+	for _, phrase := range []string{
+		"no such command or directory",
+		"no such command prefix",
+		"no such item",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // buildTLSConfig resolves how TLS connections to the router (api-ssl and
 // https REST) authenticate the server certificate. CertFP pins the exact
 // certificate, CACert trusts the CA that signed it and Insecure skips
@@ -422,11 +464,16 @@ func dialRouterOSAPI(ctx context.Context, host, port, user, pass string, timeout
 func (c *routerOSAPIConn) Close() { _ = c.conn.Close() }
 
 // queryRows runs one query and wraps any failure with the command name, so a
-// failed poll names the query that broke it.
-func (c *routerOSAPIConn) queryRows(cmd string) ([]map[string]string, error) {
-	rows, err := c.query(cmd)
+// failed poll names the query that broke it. Extra args are sent as words of
+// the same sentence ("/interface/ethernet/monitor =.id=*4 =once=").
+func (c *routerOSAPIConn) queryRows(cmd string, args ...string) ([]map[string]string, error) {
+	rows, err := c.query(cmd, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query %s: %w", cmd, err)
+		label := cmd
+		if len(args) > 0 {
+			label += " " + strings.Join(args, " ")
+		}
+		return nil, fmt.Errorf("query %s: %w", label, err)
 	}
 	return rows, nil
 }
@@ -444,8 +491,8 @@ func (c *routerOSAPIConn) beforeWrite() error {
 	return c.conn.SetWriteDeadline(time.Now().Add(c.timeout))
 }
 
-func (c *routerOSAPIConn) query(cmd string) ([]map[string]string, error) {
-	if err := c.writeSentence(cmd); err != nil {
+func (c *routerOSAPIConn) query(cmd string, args ...string) ([]map[string]string, error) {
+	if err := c.writeSentence(append([]string{cmd}, args...)...); err != nil {
 		return nil, err
 	}
 	var rows []map[string]string
@@ -461,7 +508,8 @@ func (c *routerOSAPIConn) query(cmd string) ([]map[string]string, error) {
 		case "!done":
 			return rows, nil
 		case "!trap":
-			return nil, fmt.Errorf("routeros api %s: %s", cmd, strings.Join(sentence[1:], " "))
+			message := strings.Join(sentence[1:], " ")
+			return nil, trapErrorf(menuMissingReply(message), "routeros api %s: %s", cmd, message)
 		case "!re":
 			row := map[string]string{}
 			for _, w := range sentence[1:] {
@@ -664,6 +712,14 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 	// #305 contract: the payload carries absolute counters per iface and the
 	// server does the delta, which is what turns a boca into a rate.
 	data.NetIf = routerOSNetIf(samples)
+	if err := enrichEthernetPorts(conn, data.FDB.Ports); err != nil {
+		return nil, err
+	}
+	lldp, err := pollLldp(conn)
+	if err != nil {
+		return nil, err
+	}
+	data.Lldp = lldp
 	leaseRows, err := conn.queryRows("/ip/dhcp-server/lease/print")
 	if err != nil {
 		return nil, err
@@ -839,11 +895,8 @@ func routerOSPorts(samples []etherSample) []probe.EthPort {
 			Iface:   s.name,
 			RxBytes: s.rx,
 			TxBytes: s.tx,
-			// Speed is not in a print at all: RouterOS reports the negotiated
-			// rate from /interface/ethernet/monitor, per port. That read, and
-			// the SFP diagnosis and error counters that come with it, are a
-			// separate change; until then the server shows the boca without a
-			// rate rather than an invented one.
+			// Speed, Sfp and the error counters come from /interface/ethernet:
+			// see enrichEthernetPorts.
 		})
 	}
 	return ports
@@ -864,6 +917,218 @@ func routerOSNetIf(samples []etherSample) map[string]probe.IfCounters {
 		out[s.name] = probe.IfCounters{Rx: s.rx, Tx: s.tx}
 	}
 	return out
+}
+
+// enrichEthernetPorts fills in what /interface/print does not carry: the
+// negotiated rate, the SFP digital diagnosis and the per-port error counters.
+// The two menus answer different questions:
+//
+//   - /interface/ethernet/print is the config-and-counters view. It holds the
+//     row identity (.id) that monitor needs and the error counters, but no
+//     negotiated rate.
+//   - /interface/ethernet/monitor =.id=<id> =once= is the only place RouterOS
+//     reports the negotiated rate, and it works one port per call. "once" must
+//     be sent as a parameter: sent as a bare word (the CLI spelling) the router
+//     treats the call as continuous and streams a row per second forever.
+//
+// A device without these menus traps, which is not a poll failure: the ports
+// keep the shape routerOSPorts gave them and the payload simply carries no
+// speed, exactly as before. Any other failure (timeout, framing) is returned
+// so the poll retries next cycle instead of pushing a half read.
+func enrichEthernetPorts(conn *routerOSAPIConn, ports []probe.EthPort) error {
+	ethRows, err := conn.queryRows("/interface/ethernet/print")
+	if isMenuMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	byName := make(map[string]map[string]string, len(ethRows))
+	for _, row := range ethRows {
+		if name := row["name"]; name != "" {
+			byName[name] = row
+		}
+	}
+	for i := range ports {
+		row, ok := byName[ports[i].ID]
+		if !ok {
+			continue
+		}
+		// rx-fcs-error is the received error-frame count, the same quantity
+		// ifInErrors carries over SNMP. RouterOS has no aggregate transmit
+		// error counter; tx-underrun is the only real one it reports.
+		ports[i].RxErrs, _ = strconv.ParseUint(row["rx-fcs-error"], 10, 64)
+		ports[i].TxErrs, _ = strconv.ParseUint(row["tx-underrun"], 10, 64)
+		if row[".id"] == "" {
+			continue
+		}
+		monitor, err := conn.queryRows("/interface/ethernet/monitor", "=.id="+row[".id"], "=once=")
+		if isMenuMissing(err) || len(monitor) == 0 {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		ports[i].Speed = routerOSRateLabel(monitor[0]["rate"])
+		if sfp := routerOSSfp(monitor[0]); sfp != nil {
+			ports[i].Sfp = sfp
+		}
+	}
+	return nil
+}
+
+// routerOSRateLabel spells the monitor rate ("10Gbps", "100Mbps") the way the
+// rest of the fleet reports it ("10 Gbps"). The server's parseSpeedMbps reads
+// both forms; this one is what the UI prints. An unrecognizable value stays
+// empty rather than becoming a guess.
+func routerOSRateLabel(rate string) string {
+	rate = strings.TrimSpace(rate)
+	rate = strings.TrimSuffix(rate, "bps")
+	rate = strings.TrimSuffix(rate, "Bps")
+	if len(rate) < 2 {
+		return ""
+	}
+	unit := rate[len(rate)-1]
+	number := rate[:len(rate)-1]
+	if _, err := strconv.ParseFloat(number, 64); err != nil {
+		return ""
+	}
+	switch unit {
+	case 'G':
+		return number + " Gbps"
+	case 'M':
+		return number + " Mbps"
+	}
+	return ""
+}
+
+// routerOSSfp maps the DOM block of a monitor row onto the #313 section.
+// SfpInfo cannot tell "0" from "no diagnosis", and the port panel prints
+// temperature and both power levels unconditionally, so the section is emitted
+// only when all three came through. A module that reports nothing keeps no SFP
+// section: that is the honest answer, and the same one ethtool gives.
+func routerOSSfp(monitor map[string]string) *probe.SfpInfo {
+	if !strings.EqualFold(monitor["sfp-module-present"], "true") {
+		return nil
+	}
+	temperature, errT := strconv.ParseFloat(strings.TrimSpace(monitor["sfp-temperature"]), 64)
+	txPower, errTx := strconv.ParseFloat(strings.TrimSpace(monitor["sfp-tx-power"]), 64)
+	rxPower, errRx := strconv.ParseFloat(strings.TrimSpace(monitor["sfp-rx-power"]), 64)
+	if errT != nil || errTx != nil || errRx != nil {
+		return nil
+	}
+	sfp := &probe.SfpInfo{
+		Temperature: temperature,
+		TxPower:     txPower,
+		RxPower:     rxPower,
+		Present:     true,
+		Vendor:      strings.TrimSpace(monitor["sfp-vendor-name"]),
+		PartNumber:  strings.TrimSpace(monitor["sfp-vendor-part-number"]),
+	}
+	if voltage, err := strconv.ParseFloat(strings.TrimSpace(monitor["sfp-supply-voltage"]), 64); err == nil {
+		sfp.Voltage = voltage
+	}
+	return sfp
+}
+
+// pollLldp reads the neighbor table. RouterOS has no /interface/lldp menu:
+// LLDP lives under /ip/neighbor, and the read-only /ip/neighbor/lldp table
+// (the full TLVs, including the chassis id and the remote port) was added in
+// 7.23. An older or smaller build traps for it, which the payload reports as
+// "this device cannot tell me" (Available=false) rather than as the honest
+// zero neighbors of an empty table.
+func pollLldp(conn *routerOSAPIConn) (*probe.LldpData, error) {
+	rows, err := conn.queryRows("/ip/neighbor/lldp/print")
+	if err != nil {
+		if isMenuMissing(err) {
+			return &probe.LldpData{Available: false}, nil
+		}
+		return nil, err
+	}
+	return &probe.LldpData{Available: true, Neighbors: routerOSLldpNeighbors(rows)}, nil
+}
+
+func routerOSLldpNeighbors(rows []map[string]string) []probe.LldpNeighbor {
+	neighbors := make([]probe.LldpNeighbor, 0, len(rows))
+	for _, row := range rows {
+		neighbor := probe.LldpNeighbor{
+			Port:     routerOSNeighborPort(row["interface"]),
+			Chassis:  strings.TrimSpace(row["lldp-system-name"]),
+			PortDesc: strings.TrimSpace(row["lldp-port-description"]),
+		}
+		if chassisID := strings.TrimSpace(row["lldp-chassis-id"]); chassisID != "" {
+			if strings.EqualFold(row["lldp-chassis-id-subtype"], "mac-address") {
+				neighbor.ChassisMac = strings.ToUpper(chassisID)
+			}
+			if neighbor.Chassis == "" {
+				neighbor.Chassis = chassisID
+			}
+		}
+		if neighbor.PortDesc == "" {
+			neighbor.PortDesc = strings.TrimSpace(row["lldp-port-id"])
+		}
+		// address4 is the management IPv4; address carries whatever the
+		// announcement preferred, so it is the fallback.
+		if mgmt := strings.TrimSpace(row["address4"]); mgmt != "" {
+			neighbor.Mgmt = mgmt
+		} else {
+			neighbor.Mgmt = strings.TrimSpace(row["address"])
+		}
+		neighbor.Caps = routerOSCapabilities(row["lldp-system-caps-enabled"])
+		neighbors = append(neighbors, neighbor)
+	}
+	// Deterministic order: the server keys neighbors by port, and a table that
+	// reordered between pushes would make the topology flicker (#1500).
+	sort.Slice(neighbors, func(i, j int) bool {
+		if neighbors[i].Port != neighbors[j].Port {
+			return neighbors[i].Port < neighbors[j].Port
+		}
+		return neighbors[i].ChassisMac < neighbors[j].ChassisMac
+	})
+	return neighbors
+}
+
+// routerOSNeighborPort: RouterOS lists every interface a neighbor was seen on
+// ("sfp-sfpplus1,bridge" on a switch port that is a bridge member). The port
+// the server matches a neighbor against is the physical one.
+func routerOSNeighborPort(list string) string {
+	first := ""
+	for _, name := range strings.Split(list, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if first == "" {
+			first = name
+		}
+		if name != "bridge" {
+			return name
+		}
+	}
+	return first
+}
+
+// routerOSCapabilities maps the RouterOS spelling onto the capability names
+// the agent path already uses ("Bridge", "Router", "Wlan", "Station"), so the
+// UI reads one vocabulary whichever path filled the section.
+func routerOSCapabilities(enabled string) []string {
+	names := map[string]string{
+		"other":               "Other",
+		"repeater":            "Repeater",
+		"bridge":              "Bridge",
+		"wlan-ap":             "Wlan",
+		"router":              "Router",
+		"telephone":           "Telephone",
+		"docsis-cable-device": "Docsis",
+		"station-only":        "Station",
+	}
+	var caps []string
+	for _, cap := range strings.Split(enabled, ",") {
+		if name, ok := names[strings.TrimSpace(strings.ToLower(cap))]; ok {
+			caps = append(caps, name)
+		}
+	}
+	return caps
 }
 
 func routerOSLeases(rows []map[string]string) []probe.DhcpLease {

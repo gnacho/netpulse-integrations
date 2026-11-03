@@ -7,7 +7,8 @@ RouterOS is a closed appliance OS, so the native NetPulse agent cannot run on it
 ## Coverage
 
 - System identity and resource: CPU, memory, uptime, board, version.
-- Ethernet ports.
+- Ethernet ports: link state, traffic counters, error counters, negotiated speed and, when the module reports one, the SFP digital diagnosis (temperature, supply voltage, TX/RX power, vendor and part number).
+- LLDP neighbors: local port, chassis id and name, management address, remote port and enabled capabilities.
 - DHCP leases.
 - ARP entries and stale state.
 - Bridge forwarding database.
@@ -135,6 +136,10 @@ Logs go to stderr through `slog`. Successful cycles log `integration pushed` wit
 ## Notes
 
 - The first poll has no previous counters, so WAN rates are zero until the second cycle.
+- The negotiated rate is only in `/interface/ethernet/monitor`, never in a `print`: `/interface/print` gives the counters and `/interface/ethernet/print` gives the configuration and the error counters, and neither carries a rate. Monitor takes the port by row identity (`=.id=*4`) and must be asked with `=once=` **as a parameter**: sent as the bare CLI word the router treats the call as continuous and streams one row per second without ever closing the sentence, which wedges the session. One call per port; a five-port CRS305 completes the whole poll in about 300 ms.
+- A module without a digital diagnosis reports presence, vendor and part number but no temperature or power words at all (measured on a Cisco 10G copper DAC). `probe.SfpInfo` cannot tell a zero from "no reading" and the port panel prints temperature and both power levels unconditionally, so such a boca carries no `sfp` section instead of a fabricated 0 °C / -0.0 dBm.
+- RouterOS has no `/interface/lldp` menu: v7 keeps LLDP under `/ip/neighbor`, and the read-only `/ip/neighbor/lldp` table with the full TLVs arrived in 7.23. Older or smaller builds trap for it, which the payload reports as `available: false` (this device cannot tell me) rather than as an honest empty neighbor list. Capability names are mapped onto the vocabulary the agent path already uses (`Bridge`, `Router`, `Wlan`, `Station`).
+- RouterOS frames a word longer than 63 bytes with a `0x80`-prefixed two-byte length (then `0xC0`, `0xE0`, `0xF0`+4). A client that decodes a `0x40` tier instead consumes one content byte as a length, then waits for the absurd number of bytes that follows: the router looks completely silent, and menus whose rows carry long words - `/interface/ethernet/print`, `/ip/neighbor/print` - appear to never answer. Interface rows do contain words above 63 bytes (the `advertise=` and `supported=` lists), so check the framing of any diagnostic client before concluding the device is stuck.
 - If the binary API is disabled and REST is available over https, coverage drops to system data. Enable the api-ssl service for full coverage over TLS.
 - The plaintext API on 8728 keeps working for configurations without `api_tls`, but the login credentials travel in the clear on that link.
 - The pusher does not use the OpenWrt agent self-upgrade path. Update it with your package manager or by replacing the binary.

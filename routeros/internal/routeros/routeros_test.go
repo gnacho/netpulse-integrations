@@ -477,6 +477,247 @@ func TestPollAPISluggishServerStillCompletes(t *testing.T) {
 	}
 }
 
+// The rate, the SFP diagnosis and the neighbor table are the reason the
+// pusher talks to /interface/ethernet and /ip/neighbor/lldp at all: without
+// them a RouterOS unit reports bocas with no speed, optics nobody can read
+// and a topology that has to guess the peer from the FDB.
+func TestPollAPIFillsRateDiagnosisAndNeighbors(t *testing.T) {
+	poller, f := fakeAPIPoller(t, func(cmd string) [][]byte {
+		return fixtureAPIReplies()[cmd]
+	}, 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("pollAPI: %v", err)
+	}
+	port := data.FDB.Ports[0]
+	if port.Speed != "1 Gbps" {
+		t.Fatalf("speed = %q, want \"1 Gbps\" from rate=1Gbps", port.Speed)
+	}
+	if port.RxErrs != 7 || port.TxErrs != 2 {
+		t.Fatalf("errors = %d/%d, want the 7/2 the ethernet print reported", port.RxErrs, port.TxErrs)
+	}
+	if port.Sfp != nil {
+		t.Fatalf("sfp = %+v, want none with sfp-module-present=false", port.Sfp)
+	}
+	if data.Lldp == nil || !data.Lldp.Available || len(data.Lldp.Neighbors) != 1 {
+		t.Fatalf("lldp = %+v", data.Lldp)
+	}
+	n := data.Lldp.Neighbors[0]
+	want := probe.LldpNeighbor{
+		Port:       "ether1",
+		ChassisMac: "08:BD:43:75:50:CD",
+		Chassis:    "core-switch",
+		Mgmt:       "192.168.1.1",
+		PortDesc:   "xg2",
+		Caps:       []string{"Bridge", "Router"},
+	}
+	if !sameNeighbor(n, want) {
+		t.Fatalf("neighbor = %+v, want %+v", n, want)
+	}
+
+	// The monitor must be asked with =once= as a parameter. Sent as the bare
+	// CLI word, RouterOS treats the call as continuous and streams a row per
+	// second forever, which would wedge the session.
+	var sawMonitor bool
+	for _, sentence := range f.recorded() {
+		if len(sentence) == 0 || sentence[0] != "/interface/ethernet/monitor" {
+			continue
+		}
+		sawMonitor = true
+		if !containsAll(sentence, "=.id=*2", "=once=") {
+			t.Fatalf("monitor sentence = %v, want the .id of the port and =once=", sentence)
+		}
+	}
+	if !sawMonitor {
+		t.Fatal("no /interface/ethernet/monitor query was sent")
+	}
+}
+
+// sameNeighbor compares the neighbors field by field: a slice makes the
+// struct uncomparable with ==.
+func sameNeighbor(got, want probe.LldpNeighbor) bool {
+	if got.Port != want.Port || got.ChassisMac != want.ChassisMac || got.Chassis != want.Chassis ||
+		got.Mgmt != want.Mgmt || got.PortDesc != want.PortDesc {
+		return false
+	}
+	if len(got.Caps) != len(want.Caps) {
+		return false
+	}
+	for i := range got.Caps {
+		if got.Caps[i] != want.Caps[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsAll(words []string, wanted ...string) bool {
+	for _, w := range wanted {
+		found := false
+		for _, word := range words {
+			if word == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// A board or version without these menus answers "no such command": the ports
+// keep the counters the print gave, the payload reports the neighbor table as
+// unavailable, and the poll still succeeds. Failing it would drop every other
+// section because of a feature the device does not have.
+func TestPollAPIWithoutEthernetMenusStillPushes(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/interface/ethernet/print"] = [][]byte{
+		testSentence("!trap", "=category=0", "=message=no such command or directory (ethernet)"),
+	}
+	replies["/ip/neighbor/lldp/print"] = [][]byte{
+		testSentence("!trap", "=message=no such command prefix"),
+	}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("a missing menu must not fail the poll: %v", err)
+	}
+	if data.FDB.Ports[0].Speed != "" || data.FDB.Ports[0].Sfp != nil {
+		t.Fatalf("ports = %+v, want no invented rate or optics", data.FDB.Ports[0])
+	}
+	if data.Lldp == nil || data.Lldp.Available {
+		t.Fatalf("lldp = %+v, want Available=false for a device that cannot tell", data.Lldp)
+	}
+}
+
+// A stalled ethernet query is not a missing menu: the poll must fail by
+// deadline instead of silently pushing a payload with no rate.
+func TestPollAPIFailsWhenEthernetMenuStalls(t *testing.T) {
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte {
+		if cmd == "/interface/ethernet/print" {
+			return [][]byte{} // keep the connection open, never answer
+		}
+		return fixtureAPIReplies()[cmd]
+	}, 300*time.Millisecond)
+
+	data, err := poller.pollAPI(context.Background())
+	requireRetryable(t, err)
+	if data != nil {
+		t.Fatalf("pollAPI returned data %+v on a stalled read", data)
+	}
+	if !strings.Contains(err.Error(), "/interface/ethernet/print") {
+		t.Fatalf("error must name the stalled query, got: %v", err)
+	}
+}
+
+func TestRouterOSRateLabelMatchesWhatTheServerParses(t *testing.T) {
+	cases := map[string]string{
+		"10Gbps":    "10 Gbps",
+		"1Gbps":     "1 Gbps",
+		"2.5Gbps":   "2.5 Gbps",
+		"100Mbps":   "100 Mbps",
+		"10Mbps":    "10 Mbps",
+		"":          "",
+		"unlimited": "",
+		"10":        "",
+		"10gbps":    "", // lowercase g is not what RouterOS answers
+	}
+	for input, want := range cases {
+		if got := routerOSRateLabel(input); got != want {
+			t.Errorf("routerOSRateLabel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+// SfpInfo cannot tell a zero from "no diagnosis" and the port panel prints
+// temperature and both powers unconditionally, so a present module without a
+// readable DOM must produce no section at all.
+func TestRouterOSSfpNeedsAReadableDiagnosis(t *testing.T) {
+	full := map[string]string{
+		"sfp-module-present":     "true",
+		"sfp-temperature":        "51",
+		"sfp-supply-voltage":     "3.31",
+		"sfp-tx-power":           "-3.003",
+		"sfp-rx-power":           "-2.003",
+		"sfp-vendor-name":        "CISCO-JPC ",
+		"sfp-vendor-part-number": "P3410UB01000-1 ",
+	}
+	sfp := routerOSSfp(full)
+	if sfp == nil {
+		t.Fatal("a module with a full DOM must produce a section")
+	}
+	if sfp.Temperature != 51 || sfp.Voltage != 3.31 || sfp.TxPower != -3.003 || sfp.RxPower != -2.003 {
+		t.Fatalf("dom = %+v", sfp)
+	}
+	if sfp.Vendor != "CISCO-JPC" || sfp.PartNumber != "P3410UB01000-1" {
+		t.Fatalf("vendor = %+v", sfp)
+	}
+	for name, row := range map[string]map[string]string{
+		"no module":        {"sfp-module-present": "false", "sfp-temperature": "51", "sfp-tx-power": "-3", "sfp-rx-power": "-2"},
+		"blank DOM":        {"sfp-module-present": "true"},
+		"vendor only":      {"sfp-module-present": "true", "sfp-vendor-name": "GENERIC"},
+		"unreadable power": {"sfp-module-present": "true", "sfp-temperature": "51", "sfp-tx-power": "n/a", "sfp-rx-power": "-2"},
+	} {
+		if got := routerOSSfp(row); got != nil {
+			t.Errorf("%s: sfp = %+v, want nil", name, got)
+		}
+	}
+}
+
+func TestRouterOSNeighborPortAndCapabilities(t *testing.T) {
+	if got := routerOSNeighborPort("sfp-sfpplus2,bridge"); got != "sfp-sfpplus2" {
+		t.Fatalf("port = %q, want the physical boca", got)
+	}
+	if got := routerOSNeighborPort("bridge"); got != "bridge" {
+		t.Fatalf("port = %q, want bridge when that is all there is", got)
+	}
+	if got := routerOSNeighborPort(""); got != "" {
+		t.Fatalf("port = %q, want empty", got)
+	}
+	got := routerOSCapabilities("other,repeater,bridge,wlan-ap,router,telephone,docsis-cable-device,station-only")
+	want := []string{"Other", "Repeater", "Bridge", "Wlan", "Router", "Telephone", "Docsis", "Station"}
+	if len(got) != len(want) {
+		t.Fatalf("caps = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("caps = %v, want %v", got, want)
+		}
+	}
+	if caps := routerOSCapabilities("bridge,timetable-broadcast"); len(caps) != 1 || caps[0] != "Bridge" {
+		t.Fatalf("caps = %v, want only the known capability", caps)
+	}
+}
+
+// A neighbor that announces no system name keeps its chassis id as the name,
+// the same fallback the lldpcli parser uses: an unnamed chasis is still the
+// chasis the server has to match on.
+func TestRouterOSLldpNeighborsFallBackToChassisID(t *testing.T) {
+	rows := []map[string]string{
+		{"interface": "sfp-sfpplus2,bridge", "lldp-chassis-id-subtype": "mac-address",
+			"lldp-chassis-id": "cc:e7:de:c3:f0:10", "lldp-port-id": "te7"},
+		{"interface": "sfp-sfpplus3", "lldp-chassis-id-subtype": "mac-address",
+			"lldp-chassis-id": "08:bd:43:75:50:cd", "lldp-system-name": "XS708T",
+			"address": "192.168.2.6", "lldp-port-description": "xg2"},
+	}
+	neighbors := routerOSLldpNeighbors(rows)
+	if len(neighbors) != 2 {
+		t.Fatalf("neighbors = %+v", neighbors)
+	}
+	if neighbors[0].Port != "sfp-sfpplus2" || neighbors[0].Chassis != "cc:e7:de:c3:f0:10" ||
+		neighbors[0].ChassisMac != "CC:E7:DE:C3:F0:10" || neighbors[0].PortDesc != "te7" {
+		t.Fatalf("unnamed chasis = %+v", neighbors[0])
+	}
+	if neighbors[1].Chassis != "XS708T" || neighbors[1].Mgmt != "192.168.2.6" ||
+		neighbors[1].PortDesc != "xg2" {
+		t.Fatalf("named chasis = %+v", neighbors[1])
+	}
+}
+
 // requireRetryable asserts the failure carries no Terminal marker, so the
 // shared pusher logs it, pushes nothing and retries on the next cycle.
 func requireRetryable(t *testing.T, err error) {
@@ -509,6 +750,7 @@ type fakeRouterOSAPI struct {
 	active    net.Conn
 	sawClose  bool
 	loginSeen bool
+	sentences [][]string
 }
 
 // fakeAPIPoller starts a fake API server and a poller aimed at it.
@@ -625,6 +867,9 @@ func (f *fakeRouterOSAPI) serve(conn net.Conn) {
 			f.mu.Unlock()
 			frames = [][]byte{testSentence("!done")}
 		} else {
+			f.mu.Lock()
+			f.sentences = append(f.sentences, append([]string{}, sentence...))
+			f.mu.Unlock()
 			frames = f.reply(sentence[0])
 			if frames == nil {
 				return
@@ -642,6 +887,18 @@ func (f *fakeRouterOSAPI) closeObserved() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.sawClose
+}
+
+// recorded returns every post-login sentence the client sent, so a test can
+// check the arguments of a query and not only that it happened.
+func (f *fakeRouterOSAPI) recorded() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]string, 0, len(f.sentences))
+	for _, sentence := range f.sentences {
+		out = append(out, append([]string{}, sentence...))
+	}
+	return out
 }
 
 // sawLogin reports whether the fake parsed a /login sentence, which only
@@ -731,6 +988,24 @@ func fixtureAPIReplies() map[string][][]byte {
 			done,
 		},
 		"/system/health/print": {testSentence("!re", "=name=cpu-temperature", "=value=48"), done},
+		"/interface/ethernet/print": {
+			testSentence("!re", "=.id=*2", "=name=ether1", "=running=true",
+				"=rx-fcs-error=7", "=tx-underrun=2"),
+			done,
+		},
+		"/interface/ethernet/monitor": {
+			testSentence("!re", "=name=ether1", "=status=link-ok", "=rate=1Gbps",
+				"=sfp-module-present=false"),
+			done,
+		},
+		"/ip/neighbor/lldp/print": {
+			testSentence("!re", "=.id=*1", "=interface=ether1,bridge",
+				"=address4=192.168.1.1", "=lldp-chassis-id-subtype=mac-address",
+				"=lldp-chassis-id=08:bd:43:75:50:cd", "=lldp-system-name=core-switch",
+				"=lldp-port-id=xg2", "=lldp-port-description=xg2",
+				"=lldp-system-caps-enabled=bridge,router"),
+			done,
+		},
 		"/system/resource/cpu/print": {
 			testSentence("!re", "=load=10"),
 			testSentence("!re", "=load=5"),

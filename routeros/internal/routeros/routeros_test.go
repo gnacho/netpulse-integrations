@@ -218,6 +218,70 @@ func TestRouterOSLeasesAndArpUseUpperMAC(t *testing.T) {
 	}
 }
 
+// A CRS3xx answers a different MAC for each port, and the print already lists
+// them, so the box can say which identities are its own (#1765). Rows as
+// RouterOS 7.25 answers them, with synthetic MACs: the bridge repeats ether1's
+// address, lo carries the null MAC, one row has no mac-address at all, and the
+// VLAN interface reuses a MAC another port already claimed.
+func TestRouterOSIfaceMACsAreOrderedUniqueAndUpper(t *testing.T) {
+	macs := routerOSIfaceMACs([]map[string]string{
+		{"name": "ether1", "type": "ether", "mac-address": "aa:bb:cc:dd:ee:01"},
+		{"name": "sfp-sfpplus1", "type": "ether", "mac-address": "AA:BB:CC:DD:EE:66"},
+		{"name": "sfp-sfpplus2", "type": "ether", "mac-address": "aa:bb:cc:dd:ee:02"},
+		{"name": "bridge", "type": "bridge", "mac-address": "aa:bb:cc:dd:ee:01"},
+		{"name": "vlan10", "type": "vlan", "mac-address": "aa:bb:cc:dd:ee:02"},
+		{"name": "lo", "type": "loopback", "mac-address": "00:00:00:00:00:00"},
+		{"name": "switch1", "type": "switch"},
+	})
+	want := []string{"AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:66"}
+	if len(macs) != len(want) {
+		t.Fatalf("ifaceMACs = %v, want %v", macs, want)
+	}
+	for i := range want {
+		if macs[i] != want[i] {
+			t.Fatalf("ifaceMACs = %v, want %v", macs, want)
+		}
+	}
+	if got := routerOSIfaceMACs([]map[string]string{{"name": "ether1", "type": "ether"}}); got != nil {
+		t.Errorf("a box that publishes no MAC must add none, got %v", got)
+	}
+}
+
+// The list has to reach the payload, not just the parser: the server absorbs
+// these as identities of the unit and stops listing a neighbour's FDB entry as
+// an unknown client that stays online forever (issue #1765, the ghost was one
+// SFP port's own address).
+func TestPollAPICarriesTheInterfaceIdentities(t *testing.T) {
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte {
+		if cmd == "/interface/print" {
+			return [][]byte{
+				testSentence("!re", "=name=ether1", "=type=ether", "=running=true",
+					"=mac-address=aa:bb:cc:dd:ee:01", "=rx-byte=1000", "=tx-byte=2000"),
+				testSentence("!re", "=name=sfp-sfpplus1", "=type=ether", "=running=true",
+					"=mac-address=aa:bb:cc:dd:ee:66", "=rx-byte=5", "=tx-byte=6"),
+				testSentence("!re", "=name=bridge", "=type=bridge", "=running=true",
+					"=mac-address=aa:bb:cc:dd:ee:01"),
+				testSentence("!re", "=name=lo", "=type=loopback", "=running=true",
+					"=mac-address=00:00:00:00:00:00"),
+				testSentence("!done"),
+			}
+		}
+		return fixtureAPIReplies()[cmd]
+	}, 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("pollAPI: %v", err)
+	}
+	got := data.System.IfaceMACs
+	if len(got) != 2 || got[0] != "AA:BB:CC:DD:EE:01" || got[1] != "AA:BB:CC:DD:EE:66" {
+		t.Fatalf("system.ifaceMacs = %v, want the two port identities without the null MAC", got)
+	}
+	if data.System.BridgeMAC != "AA:BB:CC:DD:EE:01" {
+		t.Fatalf("bridgeMAC = %q, the existing field must not change", data.System.BridgeMAC)
+	}
+}
+
 func TestRouterOSFDBExcludesLocalEntries(t *testing.T) {
 	fdb := routerOSFDB([]map[string]string{
 		{"mac-address": "aa:bb:cc:dd:ee:ff", "on-interface": "bridge", "local": "false"},

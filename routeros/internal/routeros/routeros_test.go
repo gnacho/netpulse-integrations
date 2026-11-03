@@ -69,6 +69,9 @@ func TestBuildPayloadMapsSystem(t *testing.T) {
 	if sys.Board.Hostname != "MikroTik-Core" || sys.Board.Release.Version != "7.15" {
 		t.Errorf("board = %+v", sys.Board)
 	}
+	if sys.Board.System != "" {
+		t.Errorf("Board.System = %q: the core renders it as the SoC, so the CPU architecture must not land there", sys.Board.System)
+	}
 }
 
 func TestBuildPayloadRejectsBadCPU(t *testing.T) {

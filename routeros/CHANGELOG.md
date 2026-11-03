@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stop writing `architecture-name` into `Board.Release.Target`. The server reads that field as the OpenWrt image target and only looks up a download profile when it is set, so `arm` turned into a target that cannot exist and the firmware panel tried to resolve it. The field is now empty, so the unit reports no detected target.
 - Stop writing `architecture-name` into `Board.System`. The server renders that field as the SoC on the router card, so a RB4011 showed `arm` as the chip next to the real `board-name`; the field is now empty and the card shows `—`.
 - Restored the documented `routeros-pusher` entrypoint and connected it to the current RouterOS poller.
 - Added CI builds and tagged amd64 release archives.

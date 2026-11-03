@@ -172,7 +172,6 @@ func buildPayload(res routerOSResource, id routerOSIdentity) (*probe.PayloadData
 	sys.SysInfo.Memory.Total = total
 	sys.SysInfo.Memory.Free = free
 	sys.Board.Release.Version = res.Version
-	sys.Board.Release.Target = res.Architecture
 	if res.BoardName != "" {
 		sys.Board.Release.Description = "RouterOS " + res.Version + " (" + res.BoardName + ")"
 	} else {

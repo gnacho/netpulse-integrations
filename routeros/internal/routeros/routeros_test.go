@@ -72,6 +72,12 @@ func TestBuildPayloadMapsSystem(t *testing.T) {
 	if sys.Board.System != "" {
 		t.Errorf("Board.System = %q: the core renders it as the SoC, so the CPU architecture must not land there", sys.Board.System)
 	}
+	if sys.Board.Release.Target != "" {
+		t.Errorf("Board.Release.Target = %q: the core reads it as an OpenWrt image target, so the CPU architecture must not land there", sys.Board.Release.Target)
+	}
+	if sys.Board.Release.Description != "RouterOS 7.15 (RB4011)" {
+		t.Errorf("Release.Description = %q", sys.Board.Release.Description)
+	}
 }
 
 func TestBuildPayloadRejectsBadCPU(t *testing.T) {

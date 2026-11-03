@@ -7,6 +7,7 @@ RouterOS is a closed appliance OS, so the native NetPulse agent cannot run on it
 ## Coverage
 
 - System identity and resource: CPU, memory, uptime, board, version.
+- Own interface identities: the MAC of every interface the print lists (bridge, VLANs and one per port), so a neighbour that learns a port's address in its FDB reports it as the unit instead of as an unknown client that never goes offline (#1765). `lo`'s null MAC is dropped and nothing is added when the router answers no address.
 - Ethernet ports.
 - DHCP leases.
 - ARP entries and stale state.

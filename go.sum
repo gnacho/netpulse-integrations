@@ -4,3 +4,5 @@ github.com/gnacho/netpulse/agent v1.5.7-0.20261026210022-135219f7a85f h1:jDOTrnz
 github.com/gnacho/netpulse/agent v1.5.7-0.20261026210022-135219f7a85f/go.mod h1:TEBH43X4N9t/UbxQzTg0WTi1V1eKZYU2zc0v4REbg90=
 github.com/gnacho/netpulse/agent v1.5.7-0.20261029191719-a9fcdb2d7739 h1:g4BNivZrCjMIdpuzk2y6/jvNy+Jj5DHm6mPUQ/g39Ew=
 github.com/gnacho/netpulse/agent v1.5.7-0.20261029191719-a9fcdb2d7739/go.mod h1:YmKpteSQJ2QL60IFOTxH2rZQA4i/1YUCZw8irRmeTZ8=
+github.com/gnacho/netpulse/agent v1.5.7-0.20261103150243-cacc8a7c4d96 h1:lebsX0sqJUhscruvc1QVsk6216iX2o6PEkMVdVd6Aho=
+github.com/gnacho/netpulse/agent v1.5.7-0.20261103150243-cacc8a7c4d96/go.mod h1:YmKpteSQJ2QL60IFOTxH2rZQA4i/1YUCZw8irRmeTZ8=

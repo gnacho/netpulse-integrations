@@ -15,6 +15,7 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 | `opnsense/` | OPNsense HTTPS API, read-only, **beta** | System, interface counters, IPv4 ARP and WAN rates with an explicitly selected interface; real-system validation pending |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 | `unifi/` | UniFi controller REST API, read-only | Gateways, switches and APs of one site: FDB ports and uplink attachments, wireless clients, ARP identities and gateway uptime |
+| `fn/` | Switch web JSON backend (`/cgi/get.cgi?cmd=...`) plus its SSH CLI | Realtek RTL930x SDK managed switches (FN SWITCH 8 PRO and siblings): CPU load, port speeds, octet counters, FDB, LLDP neighbors, model, firmware, uptime; fan temperature and memory bytes from the CLI |
 
 All integrations are read-only: they read router data and do not change
 configuration or install or upgrade firmware.

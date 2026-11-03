@@ -160,17 +160,12 @@ func buildPayload(res routerOSResource, id routerOSIdentity) (*probe.PayloadData
 	if model == "" {
 		model = "RouterOS"
 	}
-	system := res.Architecture
-	if system == "" {
-		system = "routeros"
-	}
 	sys := &probe.SystemData{
 		CPU:     &cpuLoad,
 		SysInfo: &probe.SysInfo{Uptime: uptime},
 		Board: &probe.BoardInfo{
 			Model:     model,
 			Hostname:  id.Name,
-			System:    system,
 			BoardName: res.BoardName,
 		},
 	}

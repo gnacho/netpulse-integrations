@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -154,11 +155,12 @@ type systemInformation struct {
 
 type interfaceStatistics struct {
 	Statistics map[string]struct {
-		Name    string `json:"name"`
-		RxBytes string `json:"received-bytes"`
-		TxBytes string `json:"sent-bytes"`
-		RxErr   string `json:"received-errors"`
-		TxErr   string `json:"sent-errors"`
+		Name    string      `json:"name"`
+		Network string      `json:"network"`
+		RxBytes json.Number `json:"received-bytes"`
+		TxBytes json.Number `json:"sent-bytes"`
+		RxErr   json.Number `json:"received-errors"`
+		TxErr   json.Number `json:"sent-errors"`
 	} `json:"statistics"`
 }
 
@@ -176,15 +178,15 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 		return nil, p.err
 	}
 	var system systemInformation
-	if err := p.get(ctx, "/api/core/diagnostics/system/system_information", &system); err != nil {
+	if err := p.get(ctx, "/api/diagnostics/system/system_information", &system); err != nil {
 		return nil, err
 	}
 	var statistics interfaceStatistics
-	if err := p.get(ctx, "/api/core/diagnostics/interface/get_interface_statistics", &statistics); err != nil {
+	if err := p.get(ctx, "/api/diagnostics/interface/get_interface_statistics", &statistics); err != nil {
 		return nil, err
 	}
 	var arp arpResponse
-	if err := p.get(ctx, "/api/core/diagnostics/interface/search_arp", &arp); err != nil {
+	if err := p.get(ctx, "/api/diagnostics/interface/search_arp", &arp); err != nil {
 		return nil, err
 	}
 	counters, err := parseCounters(statistics)
@@ -267,25 +269,55 @@ func (p *Poller) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// parseCounters reads one entry per interface. The firewall reports a row for
+// every address, and the row whose network is "<Link#N>" carries the totals of
+// the whole interface, so it wins over the rows for single addresses.
 func parseCounters(raw interfaceStatistics) (map[string]probe.IfCounters, error) {
-	counters := make(map[string]probe.IfCounters, len(raw.Statistics))
-	for _, sample := range raw.Statistics {
-		name := strings.TrimSpace(sample.Name)
-		if name == "" {
-			continue
-		}
-		values := []string{sample.RxBytes, sample.TxBytes, sample.RxErr, sample.TxErr}
-		parsed := make([]uint64, len(values))
-		for i, value := range values {
-			n, err := strconv.ParseUint(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("opnsense: interface %s: invalid counter %q: %w", name, value, err)
+	keys := make([]string, 0, len(raw.Statistics))
+	for key := range raw.Statistics {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	counters := make(map[string]probe.IfCounters, len(keys))
+	// Sorted keys keep the fallback stable for an interface without a link row.
+	for _, linksOnly := range []bool{true, false} {
+		for _, key := range keys {
+			sample := raw.Statistics[key]
+			name := strings.TrimSpace(sample.Name)
+			if name == "" {
+				continue
 			}
-			parsed[i] = n
+			if strings.HasPrefix(strings.TrimSpace(sample.Network), "<Link#") != linksOnly {
+				continue
+			}
+			if _, done := counters[name]; done {
+				continue
+			}
+			values, err := parseCounterValues(name, sample.RxBytes, sample.TxBytes, sample.RxErr, sample.TxErr)
+			if err != nil {
+				return nil, err
+			}
+			counters[name] = values
 		}
-		counters[name] = probe.IfCounters{Rx: parsed[0], Tx: parsed[1], RxErr: parsed[2], TxErr: parsed[3]}
 	}
 	return counters, nil
+}
+
+func parseCounterValues(name string, raw ...json.Number) (probe.IfCounters, error) {
+	parsed := make([]uint64, len(raw))
+	for i, value := range raw {
+		// The address rows omit the error counters, so an absent field is zero.
+		if value == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(value.String(), 10, 64)
+		if err != nil {
+			return probe.IfCounters{}, fmt.Errorf("opnsense: interface %s: invalid counter %q: %w", name, value.String(), err)
+		}
+		parsed[i] = n
+	}
+	return probe.IfCounters{Rx: parsed[0], Tx: parsed[1], RxErr: parsed[2], TxErr: parsed[3]}, nil
 }
 
 func parseARP(raw arpResponse) (map[string]string, map[string]string, []string) {

@@ -156,15 +156,18 @@ type systemInformation struct {
 	Versions []string `json:"versions"`
 }
 
+type interfaceStats struct {
+	Name    string      `json:"name"`
+	Network string      `json:"network"`
+	Flags   string      `json:"flags"`
+	RxBytes json.Number `json:"received-bytes"`
+	TxBytes json.Number `json:"sent-bytes"`
+	RxErr   json.Number `json:"received-errors"`
+	TxErr   json.Number `json:"sent-errors"`
+}
+
 type interfaceStatistics struct {
-	Statistics map[string]struct {
-		Name    string      `json:"name"`
-		Network string      `json:"network"`
-		RxBytes json.Number `json:"received-bytes"`
-		TxBytes json.Number `json:"sent-bytes"`
-		RxErr   json.Number `json:"received-errors"`
-		TxErr   json.Number `json:"sent-errors"`
-	} `json:"statistics"`
+	Statistics map[string]interfaceStats `json:"statistics"`
 }
 
 type arpResponse struct {
@@ -219,6 +222,9 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	data := &probe.PayloadData{
 		System: &probe.SystemData{Board: board},
 		NetIf:  counters,
+	}
+	if ports := buildPorts(statistics, counters); len(ports) > 0 {
+		data.FDB = &probe.FDBData{Ports: ports}
 	}
 	if name := strings.TrimSpace(p.cfg.WANInterface); name != "" {
 		if counters, ok := counters[name]; ok {
@@ -321,6 +327,60 @@ func parseCounterValues(name string, raw ...json.Number) (probe.IfCounters, erro
 		parsed[i] = n
 	}
 	return probe.IfCounters{Rx: parsed[0], Tx: parsed[1], RxErr: parsed[2], TxErr: parsed[3]}, nil
+}
+
+// FreeBSD interface flags as get_interface_statistics reports them, in hex
+// (an up ethernet interface arrives as 0x8843).
+const (
+	ifFlagUp           = 0x1
+	ifFlagBroadcast    = 0x2
+	ifFlagLoopback     = 0x8
+	ifFlagPointToPoint = 0x10
+)
+
+// buildPorts turns the ethernet interfaces into the port list the server uses
+// to attach per-port counters. Only the link row of each interface is read, and
+// only broadcast interfaces qualify: loopback, pflog, pfsync and enc carry no
+// user traffic. OPNsense exposes no negotiated speed here, so the field stays
+// empty.
+func buildPorts(raw interfaceStatistics, counters map[string]probe.IfCounters) []probe.EthPort {
+	keys := make([]string, 0, len(raw.Statistics))
+	for key, sample := range raw.Statistics {
+		if strings.Contains(sample.Network, "<Link#") && strings.TrimSpace(sample.Name) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	ports := make([]probe.EthPort, 0, len(keys))
+	for _, key := range keys {
+		sample := raw.Statistics[key]
+		flags := parseIfFlags(sample.Flags)
+		if flags&ifFlagBroadcast == 0 || flags&(ifFlagLoopback|ifFlagPointToPoint) != 0 {
+			continue
+		}
+		name := strings.TrimSpace(sample.Name)
+		port := probe.EthPort{
+			ID:    name,
+			Label: name,
+			Up:    flags&ifFlagUp != 0,
+			Iface: name,
+		}
+		if c, ok := counters[name]; ok {
+			port.RxBytes, port.TxBytes = c.Rx, c.Tx
+			port.RxErrs, port.TxErrs = c.RxErr, c.TxErr
+		}
+		ports = append(ports, port)
+	}
+	return ports
+}
+
+func parseIfFlags(raw string) uint64 {
+	value := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(raw)), "0x")
+	flags, err := strconv.ParseUint(value, 16, 64)
+	if err != nil {
+		return 0
+	}
+	return flags
 }
 
 func parseARP(raw arpResponse) (map[string]string, map[string]string, []string) {

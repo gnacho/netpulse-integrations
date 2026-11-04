@@ -7,6 +7,7 @@ Status: **beta, validated against OPNsense 26.7 and pending validation on user h
 - HTTPS API requests with the API key and secret in HTTP Basic Auth.
 - System hostname, product version, release description and target architecture from `system_information`.
 - Per-interface cumulative RX/TX bytes and packet errors from `get_interface_statistics`, exposed as `netIf`. The interface totals come from the `<Link#N>` row, so an interface with several addresses is counted once. Counter values are accepted both as JSON numbers and as quoted decimals.
+- The ethernet interfaces are also announced as ports (`fdb.ports`), which is what lets the dashboard show their counters. Loopback, `pflog`, `pfsync` and `enc` are excluded, and no negotiated speed is reported because the API does not expose it.
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.

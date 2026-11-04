@@ -10,4 +10,5 @@
 - Counter decoding accepts the unquoted numbers OPNsense 26.7 returns and reads the interface totals from the link row.
 - Validated end to end against a fresh OPNsense 26.7 system with a real API key.
 - `OPNSENSE_CERT_FP` accepts the colon separated fingerprint printed by the OPNsense GUI.
+- The ethernet interfaces are announced as ports, so the dashboard shows their counters. There is no speed and no link description beyond the interface name.
 - Validation on user hardware is still required before marking the integration stable.

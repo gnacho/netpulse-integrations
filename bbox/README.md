@@ -81,13 +81,19 @@ For HTTPS, set `server_fp` to the NetPulse server's SHA-256 SPKI fingerprint.
 NetPulse prints it in its startup log and exposes it at `/fingerprint`. This
 pin lets the pusher securely trust NetPulse's self-signed certificate even
 when the URL uses a LAN IP not listed in the certificate. Multiple comma
-separated fingerprints can be configured during key rotation.
+separated fingerprints can be configured during key rotation. The fingerprint
+is computed from the leaf certificate, and a pin computed from a CA matches
+only when the server sends that CA in its chain.
 
 Alternatively, omit `server_fp` and set `ca_file` to a PEM CA certificate
 when the certificate is signed by a private CA and its DNS/IP name matches
 the URL. `ca_file` does not relax host-name verification. HTTPS requires one
 of these two trust settings. `timeout` sets the NetPulse push timeout and
 defaults to 15 seconds.
+
+A redirect from the server is followed only when it stays on the same scheme,
+host and port and keeps the POST method (307 or 308). Anything else fails with
+an explicit error instead of a silent unsigned retry.
 
 The `host` may also be the Bbox LAN IP. For a local self-signed certificate,
 set `insecure` to `true` only when needed; this option applies to the Bbox

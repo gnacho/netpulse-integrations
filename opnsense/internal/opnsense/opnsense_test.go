@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -281,19 +280,53 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 	if len(data.NetIf) != 6 {
 		t.Errorf("interfaces = %d, want one entry per interface (6): %v", len(data.NetIf), data.NetIf)
 	}
+	// The server only attaches per-port counters to ports it already knows, so
+	// the pusher has to announce the ethernet interfaces. Loopback, pflog,
+	// pfsync and enc are not ports.
+	if data.FDB == nil {
+		t.Fatal("FDB = nil, want the ethernet interfaces as ports")
+	}
+	ports := data.FDB.Ports
+	if len(ports) != 2 {
+		t.Fatalf("ports = %d, want em0 and em1: %+v", len(ports), ports)
+	}
+	if p := ports[0]; p.ID != "em0" || p.Label != "em0" || p.Iface != "em0" || !p.Up {
+		t.Errorf("port 0 = %+v, want the em0 interface up", p)
+	}
+	if p := ports[0]; p.RxBytes != 107691 || p.TxBytes != 650110 {
+		t.Errorf("em0 port counters = %d/%d, want the link row", p.RxBytes, p.TxBytes)
+	}
+	if p := ports[1]; p.ID != "em1" || p.Iface != "em1" || !p.Up || p.RxBytes != 76832 || p.TxBytes != 30316 {
+		t.Errorf("port 1 = %+v, want the em1 interface with the link row counters", p)
+	}
+}
+
+func TestBuildPortsKeepsOnlyEthernetInterfaces(t *testing.T) {
+	raw := interfaceStatistics{Statistics: map[string]interfaceStats{
+		"[LAN] (em0) / 192.168.1.1":       {Name: "em0", Network: "192.168.1.0/24", Flags: "0x8843", RxBytes: "999"},
+		"[LAN] (em0) / 52:54:00:00:01:01": {Name: "em0", Network: "<Link#1>", Flags: "0x8843"},
+		"[WAN] (em1) / 52:54:00:00:01:02": {Name: "em1", Network: "<Link#2>", Flags: "0x8842"},
+		"[Loopback] (lo0) / lo0":          {Name: "lo0", Network: "<Link#3>", Flags: "0x8049"},
+		"[pflog0] / pflog0":               {Name: "pflog0", Network: "<Link#5>", Flags: "0x11"},
+		"[enc0] / enc0":                   {Name: "enc0", Network: "<Link#4>", Flags: "0x0"},
+	}}
+	ports := buildPorts(raw, nil)
+	if len(ports) != 2 {
+		t.Fatalf("ports = %+v, want em0 and em1 only", ports)
+	}
+	if p := ports[0]; p.ID != "em0" || !p.Up {
+		t.Errorf("port 0 = %+v, want em0 up", p)
+	}
+	// 0x8842 carries IFF_BROADCAST without IFF_UP.
+	if p := ports[1]; p.ID != "em1" || p.Up {
+		t.Errorf("port 1 = %+v, want em1 down", p)
+	}
 }
 
 func TestParseCountersPrefersTheLinkRow(t *testing.T) {
 	// The address rows come first in key order, so a parser that keeps the last
 	// value it sees would report the IPv4 numbers instead of the totals.
-	raw := interfaceStatistics{Statistics: map[string]struct {
-		Name    string      `json:"name"`
-		Network string      `json:"network"`
-		RxBytes json.Number `json:"received-bytes"`
-		TxBytes json.Number `json:"sent-bytes"`
-		RxErr   json.Number `json:"received-errors"`
-		TxErr   json.Number `json:"sent-errors"`
-	}{
+	raw := interfaceStatistics{Statistics: map[string]interfaceStats{
 		"[LAN] (em0) / 192.168.1.1":       {Name: "em0", Network: "192.168.1.0/24", RxBytes: "91833", TxBytes: "637306", RxErr: "0", TxErr: "0"},
 		"[LAN] (em0) / 52:54:00:00:01:01": {Name: "em0", Network: "<Link#1>", RxBytes: "107691", TxBytes: "650110", RxErr: "0", TxErr: "0"},
 	}}
@@ -307,14 +340,7 @@ func TestParseCountersPrefersTheLinkRow(t *testing.T) {
 }
 
 func TestParseCountersWithoutALinkRowKeepsOneRowPerInterface(t *testing.T) {
-	raw := interfaceStatistics{Statistics: map[string]struct {
-		Name    string      `json:"name"`
-		Network string      `json:"network"`
-		RxBytes json.Number `json:"received-bytes"`
-		TxBytes json.Number `json:"sent-bytes"`
-		RxErr   json.Number `json:"received-errors"`
-		TxErr   json.Number `json:"sent-errors"`
-	}{
+	raw := interfaceStatistics{Statistics: map[string]interfaceStats{
 		"[WAN] (em0) / 192.0.2.2": {Name: "em0", Network: "192.0.2.0/24", RxBytes: "10", TxBytes: "20", RxErr: "1", TxErr: "2"},
 		"[WAN] (em0) / 192.0.2.3": {Name: "em0", Network: "192.0.2.0/24", RxBytes: "30", TxBytes: "40", RxErr: "0", TxErr: "0"},
 	}}

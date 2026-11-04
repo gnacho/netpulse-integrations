@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -40,11 +41,11 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/api/core/diagnostics/system/system_information":
+		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
-		case "/api/core/diagnostics/interface/get_interface_statistics":
+		case "/api/diagnostics/interface/get_interface_statistics":
 			serveFixture(t, w, "interface_statistics.json")
-		case "/api/core/diagnostics/interface/search_arp":
+		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
@@ -92,12 +93,12 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 	var rx, tx uint64 = 4500000000, 900000000
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/core/diagnostics/system/system_information":
+		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
-		case "/api/core/diagnostics/interface/get_interface_statistics":
+		case "/api/diagnostics/interface/get_interface_statistics":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"statistics":{"[WAN] (em0) / 192.0.2.2":{"name":"em0","received-bytes":"%d","sent-bytes":"%d","received-errors":"0","sent-errors":"0"}}}`, rx, tx)
-		case "/api/core/diagnostics/interface/search_arp":
+		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
 		default:
 			http.NotFound(w, r)
@@ -156,11 +157,11 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/core/diagnostics/system/system_information":
+		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
-		case "/api/core/diagnostics/interface/get_interface_statistics":
+		case "/api/diagnostics/interface/get_interface_statistics":
 			serveFixture(t, w, "interface_statistics.json")
-		case "/api/core/diagnostics/interface/search_arp":
+		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
 		default:
 			http.NotFound(w, r)
@@ -230,5 +231,93 @@ func TestPollClassifiesAuthenticationAndServerErrors(t *testing.T) {
 				t.Fatalf("Terminal() = %v, want %v", terminal.Terminal(), test.auth)
 			}
 		})
+	}
+}
+
+func TestPollReadsCountersFromARealSystem(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics_real.json")
+		case "/api/diagnostics/interface/search_arp":
+			serveFixture(t, w, "arp.json")
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "test-key", APISecret: "test-secret", Insecure: true})
+	data, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	// OPNsense 26.7 sends unquoted numbers, and em0 has separate rows for the
+	// link, the IPv4 address and the IPv6 address. The link row is the total.
+	if got := data.NetIf["em0"]; got.Rx != 107691 || got.Tx != 650110 {
+		t.Errorf("em0 counters = %+v, want the link row", got)
+	}
+	if got := data.NetIf["em1"]; got.Rx != 76832 || got.Tx != 30316 {
+		t.Errorf("em1 counters = %+v, want the link row", got)
+	}
+	if got := data.NetIf["lo0"]; got.Rx != 31205 || got.Tx != 31205 {
+		t.Errorf("lo0 counters = %+v", got)
+	}
+	if got := data.NetIf["pflog0"]; got.Rx != 0 || got.Tx != 24668 {
+		t.Errorf("pflog0 counters = %+v", got)
+	}
+	if len(data.NetIf) != 6 {
+		t.Errorf("interfaces = %d, want one entry per interface (6): %v", len(data.NetIf), data.NetIf)
+	}
+}
+
+func TestParseCountersPrefersTheLinkRow(t *testing.T) {
+	// The address rows come first in key order, so a parser that keeps the last
+	// value it sees would report the IPv4 numbers instead of the totals.
+	raw := interfaceStatistics{Statistics: map[string]struct {
+		Name    string      `json:"name"`
+		Network string      `json:"network"`
+		RxBytes json.Number `json:"received-bytes"`
+		TxBytes json.Number `json:"sent-bytes"`
+		RxErr   json.Number `json:"received-errors"`
+		TxErr   json.Number `json:"sent-errors"`
+	}{
+		"[LAN] (em0) / 192.168.1.1":       {Name: "em0", Network: "192.168.1.0/24", RxBytes: "91833", TxBytes: "637306", RxErr: "0", TxErr: "0"},
+		"[LAN] (em0) / 52:54:00:00:01:01": {Name: "em0", Network: "<Link#1>", RxBytes: "107691", TxBytes: "650110", RxErr: "0", TxErr: "0"},
+	}}
+	counters, err := parseCounters(raw)
+	if err != nil {
+		t.Fatalf("parseCounters: %v", err)
+	}
+	if got := counters["em0"]; got.Rx != 107691 || got.Tx != 650110 {
+		t.Fatalf("em0 counters = %+v, want the link row", got)
+	}
+}
+
+func TestParseCountersWithoutALinkRowKeepsOneRowPerInterface(t *testing.T) {
+	raw := interfaceStatistics{Statistics: map[string]struct {
+		Name    string      `json:"name"`
+		Network string      `json:"network"`
+		RxBytes json.Number `json:"received-bytes"`
+		TxBytes json.Number `json:"sent-bytes"`
+		RxErr   json.Number `json:"received-errors"`
+		TxErr   json.Number `json:"sent-errors"`
+	}{
+		"[WAN] (em0) / 192.0.2.2": {Name: "em0", Network: "192.0.2.0/24", RxBytes: "10", TxBytes: "20", RxErr: "1", TxErr: "2"},
+		"[WAN] (em0) / 192.0.2.3": {Name: "em0", Network: "192.0.2.0/24", RxBytes: "30", TxBytes: "40", RxErr: "0", TxErr: "0"},
+	}}
+	counters, err := parseCounters(raw)
+	if err != nil {
+		t.Fatalf("parseCounters: %v", err)
+	}
+	if len(counters) != 1 {
+		t.Fatalf("counters = %v, want a single em0 entry", counters)
+	}
+	// Sorted keys make the choice deterministic: the first key wins.
+	if got := counters["em0"]; got.Rx != 10 || got.Tx != 20 || got.RxErr != 1 || got.TxErr != 2 {
+		t.Fatalf("em0 counters = %+v", got)
 	}
 }

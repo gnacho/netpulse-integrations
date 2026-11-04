@@ -1,12 +1,12 @@
 # OPNsense read-only pusher
 
-Status: **beta, pending validation on a real OPNsense system**. The implementation is based on the official OPNsense API documentation and response shapes in the official OPNsense Core source. Synthetic fixtures exercise the HTTP client, both delivery modes and the conversion to the neutral NetPulse payload. Beta packaging makes the integration available for testing; it does not claim stable support yet.
+Status: **beta, validated against OPNsense 26.7 and pending validation on user hardware**. The implementation is based on the official OPNsense API documentation and response shapes in the official OPNsense Core source, and it was checked end to end against a fresh OPNsense 26.7 VM with a real API key and a local ingest endpoint. Fixtures are captured from that system, plus a quoted variant that older releases may produce. Beta packaging makes the integration available for testing; it does not claim stable support yet.
 
 ## Implemented coverage
 
 - HTTPS API requests with the API key and secret in HTTP Basic Auth.
 - System hostname, product version, release description and target architecture from `system_information`.
-- Per-interface cumulative RX/TX bytes and packet errors from `get_interface_statistics`, exposed as `netIf`.
+- Per-interface cumulative RX/TX bytes and packet errors from `get_interface_statistics`, exposed as `netIf`. The interface totals come from the `<Link#N>` row, so an interface with several addresses is counted once. Counter values are accepted both as JSON numbers and as quoted decimals.
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
@@ -23,7 +23,6 @@ All requests use GET. The integration does not write OPNsense configuration, ins
 - NDP/IPv6 neighbor data is not mixed into the IPv4-only ARP payload.
 - DHCP leases, aliases, gateways, CPU, memory and uptime are outside this first slice.
 - Exact effective privileges for an unprivileged OPNsense API user still need verification.
-- Counter decoding currently requires the quoted decimal form used by the synthetic netstat fixture. Unquoted numeric variants, if found on a real system, need fixtures and an explicit compatibility decision.
 
 ## Managed NetPulse installation
 

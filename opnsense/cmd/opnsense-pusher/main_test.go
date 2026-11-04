@@ -16,9 +16,9 @@ import (
 
 func TestRunReadsEnvironmentAndPushesOPNsensePayload(t *testing.T) {
 	fixtures := map[string]string{
-		"/api/core/diagnostics/system/system_information":          "system_information.json",
-		"/api/core/diagnostics/interface/get_interface_statistics": "interface_statistics.json",
-		"/api/core/diagnostics/interface/search_arp":               "arp.json",
+		"/api/diagnostics/system/system_information":          "system_information.json",
+		"/api/diagnostics/interface/get_interface_statistics": "interface_statistics.json",
+		"/api/diagnostics/interface/search_arp":               "arp.json",
 	}
 	api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, secret, ok := r.BasicAuth()

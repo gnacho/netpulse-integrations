@@ -15,7 +15,7 @@ import (
 
 func unifiPusherConfig(server string) pusher.Config {
 	return pusher.Config{
-		Name: "unifi-pusher", Server: server, Token: "token", Slug: "ctrl",
+		Name: "unifi-pusher", Token: "token", Slug: "ctrl",
 		Version: "test", Interval: 20 * time.Millisecond,
 	}
 }

@@ -17,7 +17,7 @@ import (
 func TestParse(t *testing.T) {
 	const pin = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 	t.Run("single and comma-separated pins", func(t *testing.T) {
-		for _, raw := range []string{pin, " " + pin + " ", strings.ToUpper(pin), pin + "," + strings.Repeat("ab", 32)} {
+		for _, raw := range []string{pin, " " + pin + " ", strings.ToUpper(pin), pin + "," + strings.Repeat("ab", 32), "sha256/" + pin, strings.ToUpper(strings.Join([]string{pin[:8], pin[8:16], pin[16:24], pin[24:32], pin[32:40], pin[40:48], pin[48:56], pin[56:]}, ":"))} {
 			pins, err := Parse(raw)
 			if err != nil {
 				t.Fatalf("Parse(%q): %v", raw, err)

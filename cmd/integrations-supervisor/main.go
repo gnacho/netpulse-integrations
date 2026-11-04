@@ -100,7 +100,7 @@ func run(path string, logger *slog.Logger) error {
 	}
 	client, err := push.NewClient(cfg.Server, pushTimeout, cfg.CAFile, serverFP)
 	if err != nil {
-		return err
+		return fmt.Errorf("server_fp or ca_file: %w", err)
 	}
 	pollers, err := buildPollers(cfg.Integrations, version, logger)
 	if err != nil {

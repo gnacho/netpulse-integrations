@@ -177,12 +177,21 @@ func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 	sum := sha256.Sum256(server.Certificate().Raw)
 	fingerprint := hex.EncodeToString(sum[:])
 
+	colonFingerprint := func(raw []byte) string {
+		parts := make([]string, 0, len(raw))
+		for _, b := range raw {
+			parts = append(parts, fmt.Sprintf("%02X", b))
+		}
+		return strings.Join(parts, ":")
+	}
+
 	for _, test := range []struct {
 		name string
 		cfg  Config
 	}{
 		{name: "CA", cfg: Config{CACert: caFile}},
 		{name: "certificate fingerprint", cfg: Config{CertFP: fingerprint}},
+		{name: "certificate fingerprint with colons", cfg: Config{CertFP: colonFingerprint(sum[:])}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.cfg.Host = server.URL
@@ -319,5 +328,40 @@ func TestParseCountersWithoutALinkRowKeepsOneRowPerInterface(t *testing.T) {
 	// Sorted keys make the choice deterministic: the first key wins.
 	if got := counters["em0"]; got.Rx != 10 || got.Tx != 20 || got.RxErr != 1 || got.TxErr != 2 {
 		t.Fatalf("em0 counters = %+v", got)
+	}
+}
+
+func TestParseCertFP(t *testing.T) {
+	plain := strings.Repeat("ab", 32)
+	for _, test := range []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr bool
+	}{
+		{name: "plain", raw: plain, want: plain},
+		{name: "colons", raw: strings.Repeat("AB:", 31) + "AB", want: plain},
+		{name: "spaces", raw: "  " + plain + "  ", want: plain},
+		{name: "too short", raw: "ab", wantErr: true},
+		{name: "not hex", raw: strings.Repeat("zz", 32), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseCertFP(test.raw)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("parseCertFP(%q) = %q, want an error", test.raw, got)
+				}
+				if !strings.Contains(err.Error(), "colons optional") {
+					t.Fatalf("error should mention that colons are optional: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCertFP(%q): %v", test.raw, err)
+			}
+			if got != test.want {
+				t.Fatalf("parseCertFP(%q) = %q, want %q", test.raw, got, test.want)
+			}
+		})
 	}
 }

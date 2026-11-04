@@ -140,10 +140,13 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 }
 
 func parseCertFP(raw string) (string, error) {
-	fingerprint := strings.ToLower(strings.TrimSpace(raw))
+	// Operators copy the fingerprint from the GUI, which prints it as
+	// AB:CD:... so separators are accepted and dropped.
+	fingerprint := strings.ToLower(raw)
+	fingerprint = strings.NewReplacer(":", "", " ", "", "\t", "").Replace(fingerprint)
 	decoded, err := hex.DecodeString(fingerprint)
 	if err != nil || len(decoded) != sha256.Size {
-		return "", fmt.Errorf("opnsense: cert_fp must be a SHA-256 certificate fingerprint (64 hex characters)")
+		return "", fmt.Errorf("opnsense: cert_fp must be a SHA-256 certificate fingerprint (64 hex characters, colons optional)")
 	}
 	return fingerprint, nil
 }

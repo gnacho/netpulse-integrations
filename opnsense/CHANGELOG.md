@@ -9,4 +9,5 @@
 - Fixed the Diagnostics API paths, which pointed at a namespace that returns 404 on a real system.
 - Counter decoding accepts the unquoted numbers OPNsense 26.7 returns and reads the interface totals from the link row.
 - Validated end to end against a fresh OPNsense 26.7 system with a real API key.
+- `OPNSENSE_CERT_FP` accepts the colon separated fingerprint printed by the OPNsense GUI.
 - Validation on user hardware is still required before marking the integration stable.

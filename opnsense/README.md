@@ -57,7 +57,7 @@ TLS trust options for the OPNsense connection:
 | Variable | Meaning |
 |---|---|
 | `OPNSENSE_CA_CERT` | Path to a PEM file containing the CA that signed the firewall certificate, added to the system roots |
-| `OPNSENSE_CERT_FP` | One SHA-256 fingerprint, 64 hexadecimal characters, of the full leaf certificate |
+| `OPNSENSE_CERT_FP` | One SHA-256 fingerprint of the full leaf certificate. Colons and spaces are ignored, so the value can be pasted as the GUI prints it. |
 | `OPNSENSE_INSECURE=1` | Skips certificate verification as an explicit last-resort opt-out |
 
 `OPNSENSE_CA_CERT` and `OPNSENSE_CERT_FP` are mutually exclusive. With neither, normal system-root and hostname verification applies. These options cover only the connection to OPNsense. For an HTTPS NetPulse destination, the existing `NETPULSE_SERVER_FP` variable pins the NetPulse server SPKI.
@@ -81,7 +81,7 @@ Add an object to the supervisor `integrations` array:
 }
 ```
 
-The supervisor uses `cert_fp` with the same meaning as `OPNSENSE_CERT_FP`. Keep its configuration readable only by its service account because it contains the API secret and NetPulse agent token.
+The supervisor uses `cert_fp` with the same meaning as `OPNSENSE_CERT_FP`, including the colon handling. Keep its configuration readable only by its service account because it contains the API secret and NetPulse agent token.
 
 ## Local verification
 

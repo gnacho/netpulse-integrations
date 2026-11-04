@@ -95,7 +95,31 @@ func NewClient(server string, timeout time.Duration, caFile, serverFP string) (*
 	case strings.HasPrefix(server, "https://"):
 		return nil, errors.New("HTTPS requires server_fp or ca_file for server authentication")
 	}
-	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &Client{server: server, http: &http.Client{Timeout: timeout, Transport: transport, CheckRedirect: sameOriginRedirect}}, nil
+}
+
+// maxRedirects caps the redirect chain so a server that loops cannot keep the
+// pusher busy until the timeout.
+const maxRedirects = 3
+
+// sameOriginRedirect follows a redirect only when it stays on the scheme, host
+// and port of the configured server, and only when the request keeps its POST
+// method and body. The ingest endpoint expects a signed POST, so a 301, 302 or
+// 303 would silently turn the push into an unsigned GET. Refusing cross-origin
+// redirects keeps the bearer token and the signature from leaving the server
+// the operator configured.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	origin := via[0].URL
+	if req.URL.Scheme != origin.Scheme || req.URL.Host != origin.Host {
+		return fmt.Errorf("refusing redirect to another origin (%s -> %s)", origin.Redacted(), req.URL.Redacted())
+	}
+	if req.Method != http.MethodPost {
+		return fmt.Errorf("refusing redirect that changes the request method from POST to %s, the ingest endpoint only accepts a signed POST", req.Method)
+	}
+	return nil
 }
 
 // Send marshals once, then signs and sends those exact bytes.

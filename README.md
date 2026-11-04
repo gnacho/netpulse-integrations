@@ -76,6 +76,19 @@ private CA when the certificate name matches. Configure one or the other.
 Standalone pushers use the same delivery client and accept the equivalent
 `NETPULSE_SERVER_FP` or `NETPULSE_CA_FILE` environment variable.
 
+A fingerprint is the SHA-256 SPKI hash of the certificate the server presents,
+which is normally the leaf. Pinning a CA only matches a CA that the server
+actually sends in its chain, so a pin computed from a root CA fails when the
+server omits that root, as most servers do. The failure is an ordinary TLS
+verification error, with no hint that the pin format is the problem.
+
+The delivery client follows a redirect only when it stays on the same scheme,
+host and port, and only when the request keeps its POST method and body, which
+in practice means 307 and 308. A 301, 302 or 303 is refused with an explicit
+error because the ingest endpoint accepts only a signed POST, and a redirect to
+another origin is always refused so the token and the signature never leave the
+configured server.
+
 Every push is a signed HTTP request to `POST /api/ingest/agent`. The ingest
 contract, authentication, payload semantics and contribution rules are in the
 NetPulse guide:

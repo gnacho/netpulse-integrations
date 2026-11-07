@@ -23,7 +23,23 @@ All requests use GET. The integration does not write OPNsense configuration, ins
 - Link state, negotiated speed and WAN IP/gateway/DNS are not inferred from interface statistics.
 - NDP/IPv6 neighbor data is not mixed into the IPv4-only ARP payload.
 - DHCP leases, aliases, gateways, CPU, memory and uptime are outside this first slice.
-- Exact effective privileges for an unprivileged OPNsense API user still need verification.
+
+## API privileges
+
+The key belongs to an OPNsense user, and the key is the username while the secret
+is the password. On 26.7 these privileges are enough for a read-only collector,
+no more:
+
+| Privilege | Endpoints it covers |
+| --- | --- |
+| `Diagnostics: ARP Table` | `diagnostics/interface/get_arp` |
+| `Diagnostics: Netstat` | `diagnostics/interface/get_interface_statistics` |
+| `Lobby: Dashboard` | `diagnostics/system/system_information` |
+
+`System: Firmware` is not needed, even though `core/firmware/status` answers 403
+without it. Every request the pusher makes lives in the `diagnostics` module. The
+interface label lookup is best effort and falls back to the raw interface name
+when the user cannot read it.
 
 ## Managed NetPulse installation
 

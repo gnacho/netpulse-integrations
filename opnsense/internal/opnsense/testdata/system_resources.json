@@ -1,0 +1,11 @@
+{
+  "memory": {
+    "total": "8589934592",
+    "total_frmt": "8192 MB",
+    "used": 2147483648,
+    "used_frmt": "2048 MB",
+    "arc": "1073741824",
+    "arc_frmt": "1024 MB",
+    "arc_txt": "ARC size 1024 MB"
+  }
+}

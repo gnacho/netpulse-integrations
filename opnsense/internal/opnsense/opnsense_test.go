@@ -46,6 +46,10 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 			serveFixture(t, w, "interface_statistics.json")
 		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
+		case "/api/diagnostics/system/system_resources":
+			serveFixture(t, w, "system_resources.json")
+		case "/api/diagnostics/system/system_temperature":
+			serveFixture(t, w, "system_temperature.json")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -99,6 +103,10 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"statistics":{"[WAN] (em0) / 192.0.2.2":{"name":"em0","received-bytes":"%d","sent-bytes":"%d","received-errors":"0","sent-errors":"0"}}}`, rx, tx)
 		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
+		case "/api/diagnostics/system/system_resources":
+			serveFixture(t, w, "system_resources.json")
+		case "/api/diagnostics/system/system_temperature":
+			serveFixture(t, w, "system_temperature.json")
 		default:
 			http.NotFound(w, r)
 		}
@@ -162,6 +170,10 @@ func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 			serveFixture(t, w, "interface_statistics.json")
 		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
+		case "/api/diagnostics/system/system_resources":
+			serveFixture(t, w, "system_resources.json")
+		case "/api/diagnostics/system/system_temperature":
+			serveFixture(t, w, "system_temperature.json")
 		default:
 			http.NotFound(w, r)
 		}
@@ -251,6 +263,10 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 			serveFixture(t, w, "interface_statistics_real.json")
 		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
+		case "/api/diagnostics/system/system_resources":
+			serveFixture(t, w, "system_resources.json")
+		case "/api/diagnostics/system/system_temperature":
+			serveFixture(t, w, "system_temperature.json")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -298,6 +314,53 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 	}
 	if p := ports[1]; p.ID != "em1" || p.Iface != "em1" || !p.Up || p.RxBytes != 76832 || p.TxBytes != 30316 {
 		t.Errorf("port 1 = %+v, want the em1 interface with the link row counters", p)
+	}
+	// #55: memoria desde system_resources (total como cadena, used como número)
+	// y temperatura desde el array de sensores, informando el más caliente.
+	if data.System.SysInfo == nil {
+		t.Fatal("SysInfo = nil, want memory from system_resources")
+	}
+	if got := data.System.SysInfo.Memory.Total; got != 8589934592 {
+		t.Errorf("memory total = %v, want 8589934592", got)
+	}
+	if got := data.System.SysInfo.Memory.Used; got != 2147483648 {
+		t.Errorf("memory used = %v, want 2147483648", got)
+	}
+	if data.System.Temp == nil || *data.System.Temp != 53 {
+		t.Errorf("temp = %v, want the hottest sensor rounded (53)", data.System.Temp)
+	}
+}
+
+// #55: un usuario sin el permiso del dashboard (403 en resources y
+// temperature) no puede costar los contadores ni el ARP.
+func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics_real.json")
+		case "/api/diagnostics/interface/search_arp":
+			serveFixture(t, w, "arp.json")
+		case "/api/diagnostics/system/system_resources", "/api/diagnostics/system/system_temperature":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "test-key", APISecret: "test-secret", Insecure: true})
+	data, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if len(data.NetIf) != 6 || data.FDB == nil {
+		t.Fatalf("un 403 en las vitals no debe costar contadores ni puertos: %d interfaces, fdb=%v", len(data.NetIf), data.FDB)
+	}
+	if data.System.SysInfo != nil || data.System.Temp != nil {
+		t.Fatalf("sin permiso no hay dato que inventar: sysinfo=%+v temp=%v", data.System.SysInfo, data.System.Temp)
 	}
 }
 

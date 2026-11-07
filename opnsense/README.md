@@ -9,6 +9,7 @@ Status: **beta, validated against OPNsense 26.7 and pending validation on user h
 - Per-interface cumulative RX/TX bytes and packet errors from `get_interface_statistics`, exposed as `netIf`. The interface totals come from the `<Link#N>` row, so an interface with several addresses is counted once. Counter values are accepted both as JSON numbers and as quoted decimals.
 - The ethernet interfaces are also announced as ports (`fdb.ports`), which is what lets the dashboard show their counters. Loopback, `pflog`, `pfsync` and `enc` are excluded, and no negotiated speed is reported because the API does not expose it.
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
+- Memory from `system_resources` and the hottest sensor from `system_temperature`. Both are best effort: a user without the dashboard privilege keeps the counters and the ARP.
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
 - Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable.
@@ -22,7 +23,7 @@ All requests use GET. The integration does not write OPNsense configuration, ins
 - The first WAN poll establishes a counter baseline and emits no rate. Counter resets also emit no rate for that sample.
 - Link state, negotiated speed and WAN IP/gateway/DNS are not inferred from interface statistics.
 - NDP/IPv6 neighbor data is not mixed into the IPv4-only ARP payload.
-- DHCP leases, aliases, gateways, CPU, memory and uptime are outside this first slice.
+- DHCP leases, aliases, gateways, CPU, load and uptime are outside this first slice.
 
 ## API privileges
 

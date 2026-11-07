@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -179,6 +180,22 @@ type arpResponse struct {
 	} `json:"rows"`
 }
 
+// systemResources: memoria del firewall. `total` llega como cadena y `used`
+// como número, así que json.Number acepta las dos formas (#55).
+type systemResources struct {
+	Memory struct {
+		Total json.Number `json:"total"`
+		Used  json.Number `json:"used"`
+	} `json:"memory"`
+}
+
+// temperatureReading: una entrada por sensor, con la temperatura como cadena
+// decimal.
+type temperatureReading struct {
+	Temperature json.Number `json:"temperature"`
+	Type        string      `json:"type"`
+}
+
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if p.err != nil {
 		return nil, p.err
@@ -233,7 +250,55 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 		}
 	}
 	data.Arp, data.ArpDevs, data.ArpStale = parseARP(arp)
+
+	// Memoria y temperatura son best effort: un usuario sin el permiso del
+	// dashboard no debe costar los contadores ni el ARP (#55).
+	var resources systemResources
+	if err := p.get(ctx, "/api/diagnostics/system/system_resources", &resources); err == nil {
+		if total, err := parseNumber(resources.Memory.Total); err == nil && total > 0 {
+			used, _ := parseNumber(resources.Memory.Used)
+			data.System.SysInfo = &probe.SysInfo{}
+			data.System.SysInfo.Memory.Total = total
+			data.System.SysInfo.Memory.Used = used
+		}
+	}
+	var temps []temperatureReading
+	if err := p.get(ctx, "/api/diagnostics/system/system_temperature", &temps); err == nil {
+		if t, ok := hottestSensor(temps); ok {
+			data.System.Temp = &t
+		}
+	}
 	return data, nil
+}
+
+// parseNumber acepta el número JSON y la cadena decimal que devuelve la API.
+func parseNumber(n json.Number) (float64, error) {
+	if n == "" {
+		return 0, nil
+	}
+	return strconv.ParseFloat(string(n), 64)
+}
+
+// hottestSensor: el contrato del payload lleva una sola temperatura, así que
+// se informa el sensor más caliente. Un firewall puede declarar varias zonas
+// y la más alta es la que interesa vigilar.
+func hottestSensor(readings []temperatureReading) (int, bool) {
+	best := 0.0
+	found := false
+	for _, r := range readings {
+		v, err := parseNumber(r.Temperature)
+		if err != nil {
+			continue
+		}
+		if !found || v > best {
+			best = v
+			found = true
+		}
+	}
+	if !found {
+		return 0, false
+	}
+	return int(math.Round(best)), true
 }
 
 func (p *Poller) wanRates(counters probe.IfCounters) (*float64, *float64) {

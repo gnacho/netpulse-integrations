@@ -279,15 +279,14 @@ func (p *Poller) translate(device any, r map[string]any, now time.Time) *probe.P
 		cpu := object(find(cpuResponse, "cpu"))
 		cpuTime := object(cpu["time"])
 		current := cpuSample{total: number(cpuTime, "total"), idle: number(cpuTime, "idle")}
-		if p.prevCPU != nil && current.total > p.prevCPU.total && current.idle >= p.prevCPU.idle {
-			busy := 100 - int(math.Round(float64(current.idle-p.prevCPU.idle)*100/float64(current.total-p.prevCPU.total)))
-			if busy < 0 {
-				busy = 0
+		if p.prevCPU != nil && current.total >= p.prevCPU.total && current.idle >= p.prevCPU.idle {
+			busyTicks := current.total - p.prevCPU.total
+			idleTicks := current.idle - p.prevCPU.idle
+			elapsedTicks := busyTicks + idleTicks
+			if elapsedTicks > 0 {
+				busy := int(math.Round(float64(busyTicks) * 100 / float64(elapsedTicks)))
+				system.CPU = &busy
 			}
-			if busy > 100 {
-				busy = 100
-			}
-			system.CPU = &busy
 		}
 		p.prevCPU = &current
 		if raw := object(cpu["temperature"])["main"]; raw != nil {

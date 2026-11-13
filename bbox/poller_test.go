@@ -56,19 +56,29 @@ func TestTranslateConvertsMemoryAndTemperature(t *testing.T) {
 
 func TestCPUReportsDeltaOnlyAfterSecondSample(t *testing.T) {
 	poller := &Poller{}
-	first := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("1000"), "idle": json.Number("500")}}}
-	second := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("1100"), "idle": json.Number("550")}}}
+	first := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("11568200"), "idle": json.Number("352322714")}}}
+	second := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("11568313"), "idle": json.Number("352326170")}}}
 
 	gotFirst := poller.translate(nil, map[string]any{"/device/cpu": first}, time.Unix(1, 0))
 	if gotFirst.System.CPU != nil {
 		t.Fatalf("first sample CPU = %d, want absent", *gotFirst.System.CPU)
 	}
 	gotSecond := poller.translate(nil, map[string]any{"/device/cpu": second}, time.Unix(2, 0))
-	if gotSecond.System.CPU == nil || *gotSecond.System.CPU != 50 {
-		t.Fatalf("second sample CPU = %v, want 50", gotSecond.System.CPU)
+	if gotSecond.System.CPU == nil || *gotSecond.System.CPU != 3 {
+		t.Fatalf("second sample CPU = %v, want 3", gotSecond.System.CPU)
 	}
 }
 
+func TestCPUReportsZeroWhenCountersOnlyAdvanceIdle(t *testing.T) {
+	poller := &Poller{}
+	first := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("1000"), "idle": json.Number("500")}}}
+	second := map[string]any{"cpu": map[string]any{"time": map[string]any{"total": json.Number("1000"), "idle": json.Number("1500")}}}
+	poller.translate(nil, map[string]any{"/device/cpu": first}, time.Unix(1, 0))
+	got := poller.translate(nil, map[string]any{"/device/cpu": second}, time.Unix(2, 0))
+	if got.System.CPU == nil || *got.System.CPU != 0 {
+		t.Fatalf("idle-only CPU sample = %v, want 0", got.System.CPU)
+	}
+}
 func TestBandwidthConvertsKbitToBit(t *testing.T) {
 	got, ok := bandwidth(map[string]any{"bandwidth": json.Number("641057")})
 	if !ok || got != 641057000 {

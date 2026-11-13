@@ -12,7 +12,7 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 |---|---|---|
 | `routeros/` | RouterOS binary API on port 8728, REST fallback | RouterOS 7+: system, Ethernet ports, DHCP, ARP, bridge FDB, temperature, flash, firmware state and WAN rates |
 | `bbox/` | Bbox local HTTPS API | System, WAN, active hosts and Ethernet port rates |
-| `opnsense/` | OPNsense HTTPS API, read-only, **beta** | System, interface counters, IPv4 ARP and WAN rates with an explicitly selected interface; real-system validation pending |
+| `opnsense/` | OPNsense HTTPS API, read-only, **beta** | System, interface counters announced as ports, IPv4 ARP, WAN rates with an explicitly selected interface, and memory plus the hottest temperature sensor (both on main, pending a tag). Validated against OPNsense 26.7 in a VM and on a user unit |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 | `unifi/` | UniFi controller REST API, read-only | Gateways, switches and APs of one site: FDB ports and uplink attachments, wireless clients, ARP identities and gateway uptime |
 | `fn/` | Switch web JSON backend (`/cgi/get.cgi?cmd=...`) plus its SSH CLI | Realtek RTL930x SDK managed switches (FN SWITCH 8 PRO and siblings): CPU load, port speeds, octet counters, FDB, LLDP neighbors, model, firmware, uptime; fan temperature and memory bytes from the CLI |

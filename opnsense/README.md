@@ -1,6 +1,6 @@
 # OPNsense read-only pusher
 
-Status: **beta, validated against OPNsense 26.7 and pending validation on user hardware**. The implementation is based on the official OPNsense API documentation and response shapes in the official OPNsense Core source, and it was checked end to end against a fresh OPNsense 26.7 VM with a real API key and a local ingest endpoint. Fixtures are captured from that system, plus a quoted variant that older releases may produce. Beta packaging makes the integration available for testing; it does not claim stable support yet.
+Status: **beta, validated against OPNsense 26.7 in a VM and on a user unit, still pending a stable tag**. The implementation is based on the official OPNsense API documentation and response shapes in the official OPNsense Core source, and it was checked end to end against a fresh OPNsense 26.7 VM with a real API key and a local ingest endpoint. A user then ran it against a real 26.7 unit and filed #53, #55 and #56, all addressed on main. Fixtures are captured from those systems, plus a quoted variant that older releases may produce. Beta packaging makes the integration available for testing; it does not claim stable support yet.
 
 ## Implemented coverage
 

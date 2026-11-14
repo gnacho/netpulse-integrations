@@ -157,6 +157,10 @@ func (c *controller) login(ctx context.Context) error {
 	}
 	var lastErr error
 	var authErr error
+	// Every attempt is kept so the error says which endpoints answered what.
+	// Reporting only the first rejection hid the status of the endpoints that
+	// came after it (#63).
+	seen := make([]string, 0, len(attempts))
 	for _, a := range attempts {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+a.path, bytes.NewReader(body))
 		if err != nil {
@@ -166,6 +170,7 @@ func (c *controller) login(ctx context.Context) error {
 		resp, err := c.client.Do(req)
 		if err != nil {
 			lastErr = err
+			seen = append(seen, fmt.Sprintf("%s -> %v", a.path, err))
 			continue
 		}
 		_ = resp.Body.Close()
@@ -175,6 +180,7 @@ func (c *controller) login(ctx context.Context) error {
 		}
 		status := fmt.Errorf("%s: %s", a.path, resp.Status)
 		lastErr = status
+		seen = append(seen, fmt.Sprintf("%s -> %s", a.path, resp.Status))
 		// A 401/403 on an auth endpoint means the credentials were rejected,
 		// which beats the 404 of a later probe as the reported cause.
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -183,10 +189,11 @@ func (c *controller) login(ctx context.Context) error {
 			}
 		}
 	}
+	detail := strings.Join(seen, ", ")
 	if authErr != nil {
-		return &AuthenticationError{message: fmt.Sprintf("unifi: login rejected: %v", authErr)}
+		return &AuthenticationError{message: fmt.Sprintf("unifi: login rejected: %v (attempts: %s)", authErr, detail)}
 	}
-	return fmt.Errorf("unifi: login failed on all endpoints: %w", lastErr)
+	return fmt.Errorf("unifi: login failed on all endpoints: %w (attempts: %s)", lastErr, detail)
 }
 
 // get fetches one site-scoped endpoint of the logged-in session.

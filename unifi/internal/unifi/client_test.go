@@ -156,6 +156,41 @@ func TestPollStandaloneController(t *testing.T) {
 	}
 }
 
+// A console that rejects the /proxy/network login path (UniFi OS 6 answers 401
+// there whatever the credentials) must still be able to log in through
+// /api/auth/login, which is what the fallback exists for (#63).
+func TestLoginFallsThroughARejectedUniFiOSPath(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Data []rawDevice `json:"data"`
+		}{fixtureDevices()[:1]})
+	})
+	mux.HandleFunc("/api/s/default/stat/sta", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Data []rawClient `json:"data"`
+		}{nil})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("a rejected /proxy/network login must not abort the other endpoints: %v", err)
+	}
+	if data.System == nil || data.System.BridgeMAC != "74:AC:B9:00:00:01" {
+		t.Fatalf("gateway not read after falling back to /api/auth/login: %+v", data.System)
+	}
+}
+
 func TestPollTLSWithInsecure(t *testing.T) {
 	ts := httptest.NewTLSServer(controllerMux("/proxy/network", fixtureDevices()[:1], nil))
 	defer ts.Close()
@@ -261,11 +296,15 @@ func TestLoginErrorPrefersAuthRejection(t *testing.T) {
 	if err == nil {
 		t.Fatal("Poll with rejected credentials must fail")
 	}
-	if !strings.Contains(err.Error(), "401") {
-		t.Fatalf("error must report the auth rejection, got: %v", err)
+	if !strings.Contains(err.Error(), "login rejected: /proxy/network/api/auth/login: 401") {
+		t.Fatalf("error must lead with the auth rejection, got: %v", err)
 	}
-	if strings.Contains(err.Error(), "404") {
-		t.Fatalf("error must not report the probe 404s, got: %v", err)
+	// The rejection leads the message, and every attempt is listed after it so
+	// the next report says what each endpoint answered instead of hiding it.
+	for _, want := range []string{"attempts:", "/proxy/network/api/auth/login -> 401", "/api/auth/login -> 404", "/api/login -> 404"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must list %q, got: %v", want, err)
+		}
 	}
 	var authErr *AuthenticationError
 	if !errors.As(err, &authErr) {

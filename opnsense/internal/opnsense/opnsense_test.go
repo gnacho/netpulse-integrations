@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gnacho/netpulse/agent/probe"
 )
 
 func serveFixture(t *testing.T, w http.ResponseWriter, name string) {
@@ -69,6 +71,8 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 			serveFixture(t, w, "system_time.json")
 		case "/api/diagnostics/cpu_usage/stream":
 			serveStream(t, w, "cpu_usage_stream.txt")
+		case "/api/diagnostics/traffic/top/lan":
+			serveFixture(t, w, "traffic_top.json")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -130,6 +134,8 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 			serveFixture(t, w, "system_time.json")
 		case "/api/diagnostics/cpu_usage/stream":
 			serveStream(t, w, "cpu_usage_stream.txt")
+		case "/api/diagnostics/traffic/top/lan":
+			serveFixture(t, w, "traffic_top.json")
 		default:
 			http.NotFound(w, r)
 		}
@@ -201,6 +207,8 @@ func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 			serveFixture(t, w, "system_time.json")
 		case "/api/diagnostics/cpu_usage/stream":
 			serveStream(t, w, "cpu_usage_stream.txt")
+		case "/api/diagnostics/traffic/top/lan":
+			serveFixture(t, w, "traffic_top.json")
 		default:
 			http.NotFound(w, r)
 		}
@@ -298,6 +306,8 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 			serveFixture(t, w, "system_time.json")
 		case "/api/diagnostics/cpu_usage/stream":
 			serveStream(t, w, "cpu_usage_stream.txt")
+		case "/api/diagnostics/traffic/top/lan":
+			serveFixture(t, w, "traffic_top.json")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -390,6 +400,7 @@ func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 		case "/api/diagnostics/system/system_resources",
 			"/api/diagnostics/system/system_temperature",
 			"/api/diagnostics/system/system_time",
+			"/api/diagnostics/traffic/top/lan",
 			"/api/diagnostics/cpu_usage/stream":
 			http.Error(w, "forbidden", http.StatusForbidden)
 		default:
@@ -409,6 +420,11 @@ func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 	}
 	if data.System.SysInfo != nil || data.System.Temp != nil || data.System.CPU != nil {
 		t.Fatalf("sin permiso no hay dato que inventar: sysinfo=%+v temp=%v cpu=%v", data.System.SysInfo, data.System.Temp, data.System.CPU)
+	}
+	// #65: sin el privilegio de Reporting se declara la fuente como no
+	// disponible, que es distinto de "sin datos esta ronda".
+	if data.ClientBw == nil || data.ClientBw.Available {
+		t.Fatalf("clientBw = %+v, want an explicit unavailable source", data.ClientBw)
 	}
 }
 
@@ -609,5 +625,181 @@ func TestCPUStreamClampsOutOfRangeValues(t *testing.T) {
 				t.Fatalf("cpuUsage() = %v, want %d", cpu, test.want)
 			}
 		})
+	}
+}
+
+// #65: traffic/top da tasas por IP en una ventana de 2 s, no contadores. El
+// pusher integra cada muestra en un total por MAC y el servidor lo diferencia
+// entre pushes. La primera muestra solo abre la ventana.
+func TestClientTrafficIntegratesRatesIntoPerClientCounters(t *testing.T) {
+	arp := `{"rows":[{"mac":"AA:BB:CC:DD:EE:01","ip":"10.0.0.60","intf":"lan","expired":false}]}`
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics.json")
+		case "/api/diagnostics/interface/search_arp":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(arp))
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/system/system_resources", "/api/diagnostics/system/system_temperature":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/diagnostics/cpu_usage/stream":
+			serveStream(t, w, "cpu_usage_stream.txt")
+		case "/api/diagnostics/traffic/top/lan":
+			serveFixture(t, w, "traffic_top.json")
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+	now := time.Unix(1000, 0)
+	poller.now = func() time.Time { return now }
+
+	first, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("first Poll: %v", err)
+	}
+	if first.ClientBw != nil {
+		t.Fatalf("first sample must only open the window, got %+v", first.ClientBw)
+	}
+
+	now = now.Add(30 * time.Second)
+	second, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("second Poll: %v", err)
+	}
+	if second.ClientBw == nil || !second.ClientBw.Available {
+		t.Fatalf("second sample = %+v, want the counters", second.ClientBw)
+	}
+	mac := "AA:BB:CC:DD:EE:01"
+	// 67812 bit/s in and 6844 bit/s out over 30 s, in bytes.
+	got := second.ClientBw.Hosts[mac]
+	if got.RxBytes != 254295 || got.TxBytes != 25665 {
+		t.Fatalf("counters = %+v, want 254295/25665", got)
+	}
+	// 224.0.0.251 is not in the ARP table, so it is not a client.
+	if len(second.ClientBw.Hosts) != 1 {
+		t.Fatalf("hosts = %+v, want only the ARP host", second.ClientBw.Hosts)
+	}
+
+	now = now.Add(10 * time.Second)
+	third, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("third Poll: %v", err)
+	}
+	got = third.ClientBw.Hosts[mac]
+	if got.RxBytes != 339060 || got.TxBytes != 34220 {
+		t.Fatalf("counters = %+v, want 254295+84765 and 25665+8555", got)
+	}
+}
+
+// #65: una muestra fallida no se puede cobrar al intervalo siguiente con la
+// tasa que hubiera sonado. La ventana se reabre y el hueco queda sin datos.
+func TestClientTrafficDropsTheWindowAfterAFailedSample(t *testing.T) {
+	var trafficStatus = []int{http.StatusOK, http.StatusOK, http.StatusInternalServerError, http.StatusOK, http.StatusOK}
+	calls := 0
+	arp := `{"rows":[{"mac":"AA:BB:CC:DD:EE:01","ip":"10.0.0.60","intf":"lan","expired":false}]}`
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics.json")
+		case "/api/diagnostics/interface/search_arp":
+			_, _ = w.Write([]byte(arp))
+		case "/api/diagnostics/system/system_time", "/api/diagnostics/traffic/top/lan":
+			status := http.StatusOK
+			if r.URL.Path == "/api/diagnostics/traffic/top/lan" {
+				status = trafficStatus[min(calls, len(trafficStatus)-1)]
+				calls++
+			}
+			if status != http.StatusOK {
+				http.Error(w, "boom", status)
+				return
+			}
+			if r.URL.Path == "/api/diagnostics/traffic/top/lan" {
+				serveFixture(t, w, "traffic_top.json")
+				return
+			}
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/system/system_resources", "/api/diagnostics/system/system_temperature":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/diagnostics/cpu_usage/stream":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+	now := time.Unix(1000, 0)
+	poller.now = func() time.Time { return now }
+
+	polls := make([]*probe.PayloadData, 0, 5)
+	for i := 0; i < 5; i++ {
+		if i > 0 {
+			now = now.Add(30 * time.Second)
+		}
+		data, err := poller.Poll(context.Background())
+		if err != nil {
+			t.Fatalf("poll %d: %v", i, err)
+		}
+		polls = append(polls, data)
+	}
+	if polls[0].ClientBw != nil {
+		t.Fatalf("poll 0 = %+v, want no counters on the first sample", polls[0].ClientBw)
+	}
+	if polls[1].ClientBw == nil {
+		t.Fatal("poll 1 should carry the first accumulated window")
+	}
+	// El fallo (poll 2) y la muestra siguiente (poll 3) no traen contadores: el
+	// hueco se descarta y la ventana se reabre.
+	if polls[2].ClientBw != nil || polls[3].ClientBw != nil {
+		t.Fatalf("polls after the failure = %+v / %+v, want no counters", polls[2].ClientBw, polls[3].ClientBw)
+	}
+	// Del poll 1 al 4 han pasado 90 s, pero solo se ha integrado UNA ventana de
+	// 30 s: el hueco del fallo no se cobra con la tasa de después.
+	mac := "AA:BB:CC:DD:EE:01"
+	before := polls[1].ClientBw.Hosts[mac].RxBytes
+	after := polls[4].ClientBw.Hosts[mac].RxBytes
+	if want := before + 254295; after != want {
+		t.Fatalf("rx = %d, want %d (one window of 30 s, not three)", after, want)
+	}
+}
+
+func TestTrafficPathRejectsUnexpectedValues(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		{raw: "lan", want: "/api/diagnostics/traffic/top/lan", ok: true},
+		{raw: "LAN,opt1", want: "/api/diagnostics/traffic/top/lan,opt1", ok: true},
+		{raw: "  lan  ", want: "/api/diagnostics/traffic/top/lan", ok: true},
+		{raw: ""},
+		{raw: "../status"},
+		{raw: "lan/status"},
+	} {
+		got, ok := trafficPath(test.raw)
+		if ok != test.ok || got != test.want {
+			t.Fatalf("trafficPath(%q) = %q, %v, want %q, %v", test.raw, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestNewDefaultsTheTrafficInterface(t *testing.T) {
+	if got := New(Config{Host: "https://firewall.test"}).cfg.TrafficInterfaces; got != defaultTrafficInterfaces {
+		t.Fatalf("default traffic interfaces = %q, want %q", got, defaultTrafficInterfaces)
+	}
+	if got := New(Config{Host: "https://firewall.test", TrafficInterfaces: "lan,opt1"}).cfg.TrafficInterfaces; got != "lan,opt1" {
+		t.Fatalf("configured traffic interfaces = %q", got)
 	}
 }

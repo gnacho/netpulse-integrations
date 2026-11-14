@@ -38,6 +38,8 @@ func run(ctx context.Context) error {
 		CACert:       os.Getenv("OPNSENSE_CA_CERT"),
 		CertFP:       os.Getenv("OPNSENSE_CERT_FP"),
 		WANInterface: os.Getenv("OPNSENSE_WAN_INTERFACE"),
+		// Interfaz(es) lógicas del tráfico por cliente ("lan", "lan,opt1").
+		TrafficInterfaces: os.Getenv("OPNSENSE_TRAFFIC_INTERFACES"),
 	})
 	return pusher.Run(ctx, cfg, pusher.FromData(poller.Poll))
 }

@@ -34,7 +34,7 @@
       "tagPrefix": "opnsense/v",
       "binary": "opnsense-pusher",
       "target": "opnsense/cmd/opnsense-pusher",
-      "description": "Beta read-only OPNsense API pusher for system data, interface counters, ARP and explicitly configured WAN rates"
+      "description": "Beta read-only OPNsense API pusher for system data, interface counters, ARP, per-client traffic and explicitly configured WAN rates"
     },
     {
       "id": "routeros",

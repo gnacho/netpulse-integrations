@@ -11,6 +11,7 @@ Status: **beta, validated against OPNsense 26.7 in a VM and on a user unit, stil
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
 - Memory from `system_resources` and the hottest sensor from `system_temperature`. Both are best effort: a user without the dashboard privilege keeps the counters and the ARP.
 - Uptime and load average from `system_time`, and CPU usage from the first event of `cpu_usage/stream`. The firewall serves the CPU as an SSE stream that never ends by itself, so the pusher reads one event and closes the connection. These are best effort too. The load average travels in the payload for parity with the native agent, which reports it from ubus, but the dashboard does not render it yet.
+- Per-client traffic for the Clients view from `traffic/top`, the same sample behind Reporting: Traffic. iftop measures each host for 2 seconds and the API reports a rate in bit/s, with no lifetime counters (`cumulative_bytes` covers that 2 s window only). The pusher integrates the rate into a running total per MAC, using the ARP table for the IP to MAC mapping, and the server differences those totals between pushes. The number that reaches the dashboard is therefore an average of samples, not bytes counted by the firewall. A host that is not in the ARP table is not reported, and the in/out split follows the API as it reports it: only the total is guaranteed. Without the `Reporting: Traffic` privilege the endpoint answers 403 and the section is simply absent. Each poll spends the 2 second sample plus the reverse lookups on the firewall, so a short `NETPULSE_INTERVAL` multiplies that cost.
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
 - Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable.
@@ -37,6 +38,7 @@ no more:
 | `Diagnostics: ARP Table` | `diagnostics/interface/get_arp` |
 | `Diagnostics: Netstat` | `diagnostics/interface/get_interface_statistics` |
 | `Lobby: Dashboard` | `diagnostics/system/system_information` |
+| `Reporting: Traffic` | `diagnostics/traffic/top` (optional, per-client traffic) |
 
 `System: Firmware` is not needed, even though `core/firmware/status` answers 403
 without it. Every request the pusher makes lives in the `diagnostics` module. The
@@ -68,6 +70,7 @@ export OPNSENSE_USER=REPLACE_WITH_API_KEY
 export OPNSENSE_PASS=REPLACE_WITH_API_SECRET
 export OPNSENSE_CA_CERT=/etc/netpulse/opnsense-ca.pem
 export OPNSENSE_WAN_INTERFACE=em0
+export OPNSENSE_TRAFFIC_INTERFACES=lan
 export NETPULSE_SERVER=http://netpulse.example:3000
 export NETPULSE_TOKEN=REPLACE_WITH_EXTERNAL_AGENT_TOKEN
 export NETPULSE_SLUG=opnsense-lab
@@ -76,6 +79,8 @@ export NETPULSE_INTERVAL=60s
 ```
 
 `OPNSENSE_HOST` accepts a hostname, IP or HTTPS base URL. Plain HTTP is not accepted. `OPNSENSE_USER` is the API key and `OPNSENSE_PASS` is its secret. The secret is displayed only once when the key is created.
+
+`OPNSENSE_TRAFFIC_INTERFACES` is the comma separated list of logical interface names whose per-host rates feed the Clients view (`lan` by default, `lan,opt1` for more than one). The managed installer does not set it, so a firewall whose LAN is not `lan` needs the standalone or shared-supervisor configuration for per-client traffic. The feature also needs the `Reporting: Traffic` privilege on the API user, which the README above lists as optional.
 
 TLS trust options for the OPNsense connection:
 

@@ -28,6 +28,21 @@ func serveFixture(t *testing.T, w http.ResponseWriter, name string) {
 	_, _ = w.Write(encoded)
 }
 
+// serveStream returns a captured SSE body as the firewall sends it, with the
+// event-stream content type so a client that expects JSON fails instead of
+// hanging.
+func serveStream(t *testing.T, w http.ResponseWriter, name string) {
+	t.Helper()
+	body, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Errorf("read fixture %s: %v", name, err)
+		http.Error(w, "fixture unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = w.Write(body)
+}
+
 func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -50,6 +65,10 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 			serveFixture(t, w, "system_resources.json")
 		case "/api/diagnostics/system/system_temperature":
 			serveFixture(t, w, "system_temperature.json")
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/cpu_usage/stream":
+			serveStream(t, w, "cpu_usage_stream.txt")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -107,6 +126,10 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 			serveFixture(t, w, "system_resources.json")
 		case "/api/diagnostics/system/system_temperature":
 			serveFixture(t, w, "system_temperature.json")
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/cpu_usage/stream":
+			serveStream(t, w, "cpu_usage_stream.txt")
 		default:
 			http.NotFound(w, r)
 		}
@@ -174,6 +197,10 @@ func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 			serveFixture(t, w, "system_resources.json")
 		case "/api/diagnostics/system/system_temperature":
 			serveFixture(t, w, "system_temperature.json")
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/cpu_usage/stream":
+			serveStream(t, w, "cpu_usage_stream.txt")
 		default:
 			http.NotFound(w, r)
 		}
@@ -267,6 +294,10 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 			serveFixture(t, w, "system_resources.json")
 		case "/api/diagnostics/system/system_temperature":
 			serveFixture(t, w, "system_temperature.json")
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/cpu_usage/stream":
+			serveStream(t, w, "cpu_usage_stream.txt")
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -329,10 +360,24 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 	if data.System.Temp == nil || *data.System.Temp != 53 {
 		t.Errorf("temp = %v, want the hottest sensor rounded (53)", data.System.Temp)
 	}
+	// #55: uptime y carga desde system_time. El uptime llega ya formateado por
+	// OPNsense ("00:02:13" son 133 s), no como segundos.
+	if got := data.System.SysInfo.Uptime; got != 133 {
+		t.Errorf("uptime = %v, want 133 seconds", got)
+	}
+	load := data.System.SysInfo.Load
+	if len(load) != 3 || load[0] != 0.24 || load[1] != 0.14 || load[2] != 0.06 {
+		t.Errorf("load = %v, want [0.24 0.14 0.06]", load)
+	}
+	// #55: CPU del primer evento del stream SSE (total = 100 - idle). El
+	// segundo evento del fixture no se lee: el stream no termina solo.
+	if data.System.CPU == nil || *data.System.CPU != 8 {
+		t.Errorf("cpu = %v, want the first event (8)", data.System.CPU)
+	}
 }
 
-// #55: un usuario sin el permiso del dashboard (403 en resources y
-// temperature) no puede costar los contadores ni el ARP.
+// #55: un usuario sin el permiso del dashboard (403 en las vitals) no puede
+// costar los contadores ni el ARP.
 func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -342,7 +387,10 @@ func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 			serveFixture(t, w, "interface_statistics_real.json")
 		case "/api/diagnostics/interface/search_arp":
 			serveFixture(t, w, "arp.json")
-		case "/api/diagnostics/system/system_resources", "/api/diagnostics/system/system_temperature":
+		case "/api/diagnostics/system/system_resources",
+			"/api/diagnostics/system/system_temperature",
+			"/api/diagnostics/system/system_time",
+			"/api/diagnostics/cpu_usage/stream":
 			http.Error(w, "forbidden", http.StatusForbidden)
 		default:
 			t.Errorf("unexpected request path %s", r.URL.Path)
@@ -359,8 +407,8 @@ func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 	if len(data.NetIf) != 6 || data.FDB == nil {
 		t.Fatalf("un 403 en las vitals no debe costar contadores ni puertos: %d interfaces, fdb=%v", len(data.NetIf), data.FDB)
 	}
-	if data.System.SysInfo != nil || data.System.Temp != nil {
-		t.Fatalf("sin permiso no hay dato que inventar: sysinfo=%+v temp=%v", data.System.SysInfo, data.System.Temp)
+	if data.System.SysInfo != nil || data.System.Temp != nil || data.System.CPU != nil {
+		t.Fatalf("sin permiso no hay dato que inventar: sysinfo=%+v temp=%v cpu=%v", data.System.SysInfo, data.System.Temp, data.System.CPU)
 	}
 }
 
@@ -450,6 +498,115 @@ func TestParseCertFP(t *testing.T) {
 			}
 			if got != test.want {
 				t.Fatalf("parseCertFP(%q) = %q, want %q", test.raw, got, test.want)
+			}
+		})
+	}
+}
+
+// #55: OPNsense formatea el uptime como "HH:MM:SS" y "N days, HH:MM:SS"
+// (formatUptime() en el core). Un texto que no encaje deja el uptime sin
+// informar en vez de inventar cero.
+func TestParseUptime(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want float64
+		ok   bool
+	}{
+		{name: "minutes from the capture", raw: "00:02:13", want: 133, ok: true},
+		{name: "hours", raw: "13:45:10", want: 49510, ok: true},
+		{name: "one day singular", raw: "1 day, 00:00:00", want: 86400, ok: true},
+		{name: "days plural", raw: "2 days, 03:04:05", want: 183845, ok: true},
+		{name: "surrounding spaces", raw: "  2 days, 03:04:05  ", want: 183845, ok: true},
+		{name: "unknown", raw: "N/A", ok: false},
+		{name: "empty", raw: "", ok: false},
+		{name: "seconds as text", raw: "3600 seconds", ok: false},
+		{name: "missing seconds", raw: "12:30", ok: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := parseUptime(test.raw)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("parseUptime(%q) = %v, %v, want %v, %v", test.raw, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestParseLoadAvg(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+		want []float64
+	}{
+		{name: "three values", raw: "0.24, 0.14, 0.06", want: []float64{0.24, 0.14, 0.06}},
+		{name: "no spaces", raw: "1.00,2.50,3.75", want: []float64{1, 2.5, 3.75}},
+		{name: "unavailable", raw: "N/A", want: nil},
+		{name: "empty", raw: "", want: nil},
+		{name: "too many values", raw: "1, 2, 3, 4", want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseLoadAvg(test.raw)
+			if len(got) != len(test.want) {
+				t.Fatalf("parseLoadAvg(%q) = %v, want %v", test.raw, got, test.want)
+			}
+			for i := range got {
+				if got[i] != test.want[i] {
+					t.Fatalf("parseLoadAvg(%q) = %v, want %v", test.raw, got, test.want)
+				}
+			}
+		})
+	}
+}
+
+// #55: el stream de cpu_usage no termina solo. Un cuerpo sin ningún evento
+// tiene que devolver error y dejar el poller sin CPU, no colgarse.
+func TestCPUStreamWithoutEvents(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{name: "empty body", body: ""},
+		{name: "only comments", body: ": keep-alive\n\n"},
+		{name: "malformed event", body: "event: message\ndata: {not json\n\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+			if cpu, err := poller.cpuUsage(context.Background()); err == nil {
+				t.Fatalf("cpuUsage() = %v, want an error", cpu)
+			}
+		})
+	}
+}
+
+// Un evento con el porcentaje fuera de rango se acota: la tarjeta pinta un
+// porcentaje y un valor negativo o mayor de 100 es imposible.
+func TestCPUStreamClampsOutOfRangeValues(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "negative", body: "data: {\"total\":-4,\"idle\":104}\n\n", want: 0},
+		{name: "over one hundred", body: "data: {\"total\":130,\"idle\":-30}\n\n", want: 100},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+			cpu, err := poller.cpuUsage(context.Background())
+			if err != nil {
+				t.Fatalf("cpuUsage: %v", err)
+			}
+			if cpu == nil || *cpu != test.want {
+				t.Fatalf("cpuUsage() = %v, want %d", cpu, test.want)
 			}
 		})
 	}

@@ -1,6 +1,7 @@
 package opnsense
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -196,6 +198,36 @@ type temperatureReading struct {
 	Type        string      `json:"type"`
 }
 
+// systemTime: uptime y carga media. OPNsense formatea el uptime ya calculado
+// (formatUptime() en el controlador del core) y la carga como tres decimales
+// separados por coma, o "N/A" cuando no puede leer vm.loadavg (#55).
+type systemTime struct {
+	Uptime  string `json:"uptime"`
+	LoadAvg string `json:"loadavg"`
+}
+
+// cpuSample: un evento del stream de cpu_usage. `total` es el porcentaje
+// ocupado (100 - idle) que calcula el script que lo sirve, y el resto son los
+// componentes de ese tiempo.
+type cpuSample struct {
+	Total int `json:"total"`
+	Idle  int `json:"idle"`
+}
+
+const (
+	systemTimePath = "/api/diagnostics/system/system_time"
+	// cpuStreamPath sirve un evento por segundo y no termina solo: se corta en
+	// cuanto llega el primer dato.
+	cpuStreamPath = "/api/diagnostics/cpu_usage/stream"
+	// cpuStreamWait acota esa lectura. El bucle del pusher se queda esperando
+	// el evento, así que no puede colgarse con el stream abierto.
+	cpuStreamWait = 5 * time.Second
+)
+
+// uptimePattern: "HH:MM:SS" sin días y "N days, HH:MM:SS" con ellos. Es el
+// formato literal de formatUptime() en OPNsense (day en singular con 1).
+var uptimePattern = regexp.MustCompile(`^(?:(\d+)\s+days?,\s*)?(\d+):(\d{2}):(\d{2})$`)
+
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if p.err != nil {
 		return nil, p.err
@@ -251,16 +283,32 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	}
 	data.Arp, data.ArpDevs, data.ArpStale = parseARP(arp)
 
-	// Memoria y temperatura son best effort: un usuario sin el permiso del
-	// dashboard no debe costar los contadores ni el ARP (#55).
+	// Vitals best effort: uptime y carga de system_time, memoria de
+	// system_resources, el sensor más caliente de system_temperature y la CPU
+	// del stream de cpu_usage. Un usuario sin el privilegio del dashboard no
+	// debe costar los contadores ni el ARP (#55).
+	sysInfo := &probe.SysInfo{}
+	haveSysInfo := false
+	var clock systemTime
+	if err := p.get(ctx, systemTimePath, &clock); err == nil {
+		if seconds, ok := parseUptime(clock.Uptime); ok {
+			sysInfo.Uptime, haveSysInfo = seconds, true
+		}
+		if load := parseLoadAvg(clock.LoadAvg); len(load) > 0 {
+			sysInfo.Load, haveSysInfo = load, true
+		}
+	}
 	var resources systemResources
 	if err := p.get(ctx, "/api/diagnostics/system/system_resources", &resources); err == nil {
 		if total, err := parseNumber(resources.Memory.Total); err == nil && total > 0 {
 			used, _ := parseNumber(resources.Memory.Used)
-			data.System.SysInfo = &probe.SysInfo{}
-			data.System.SysInfo.Memory.Total = total
-			data.System.SysInfo.Memory.Used = used
+			sysInfo.Memory.Total = total
+			sysInfo.Memory.Used = used
+			haveSysInfo = true
 		}
+	}
+	if haveSysInfo {
+		data.System.SysInfo = sysInfo
 	}
 	var temps []temperatureReading
 	if err := p.get(ctx, "/api/diagnostics/system/system_temperature", &temps); err == nil {
@@ -268,7 +316,97 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 			data.System.Temp = &t
 		}
 	}
+	if cpu, err := p.cpuUsage(ctx); err == nil {
+		data.System.CPU = cpu
+	}
 	return data, nil
+}
+
+// parseUptime convierte el texto de system_time en segundos. Un formato
+// inesperado (una versión que cambie el texto, o una traducción de "N/A") no
+// inventa un uptime: se deja sin dato.
+func parseUptime(raw string) (float64, bool) {
+	match := uptimePattern.FindStringSubmatch(strings.TrimSpace(raw))
+	if match == nil {
+		return 0, false
+	}
+	values := make([]int, 0, 3)
+	for _, field := range match[2:] {
+		v, err := strconv.Atoi(field)
+		if err != nil {
+			return 0, false
+		}
+		values = append(values, v)
+	}
+	days := 0
+	if match[1] != "" {
+		d, err := strconv.Atoi(match[1])
+		if err != nil {
+			return 0, false
+		}
+		days = d
+	}
+	return float64(days*86400 + values[0]*3600 + values[1]*60 + values[2]), true
+}
+
+// parseLoadAvg: "0.24, 0.14, 0.06" (1, 5 y 15 minutos). Cualquier valor que no
+// sea una lista de números deja la carga sin informar.
+func parseLoadAvg(raw string) []float64 {
+	fields := strings.Split(strings.TrimSpace(raw), ",")
+	if len(fields) == 0 || len(fields) > 3 {
+		return nil
+	}
+	load := make([]float64, 0, len(fields))
+	for _, field := range fields {
+		v, err := strconv.ParseFloat(strings.TrimSpace(field), 64)
+		if err != nil {
+			return nil
+		}
+		load = append(load, v)
+	}
+	return load
+}
+
+// cpuUsage lee el primer evento del stream SSE de cpu_usage y cierra la
+// conexión. El firewall solo publica el dato ya calculado, así que no se
+// deriva nada en el pusher.
+func (p *Poller) cpuUsage(ctx context.Context) (*int, error) {
+	ctx, cancel := context.WithTimeout(ctx, cpuStreamWait)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+cpuStreamPath, nil)
+	if err != nil {
+		return nil, fmt.Errorf("opnsense: build request: %w", err)
+	}
+	req.SetBasicAuth(p.cfg.APIKey, p.cfg.APISecret)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opnsense: GET %s: %w", cpuStreamPath, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, &AuthenticationError{message: fmt.Sprintf("opnsense: GET %s: %s: credentials rejected", cpuStreamPath, resp.Status)}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("opnsense: GET %s: %s", cpuStreamPath, resp.Status)
+	}
+	scanner := bufio.NewScanner(io.LimitReader(resp.Body, 64<<10))
+	for scanner.Scan() {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(scanner.Text()), "data:")
+		if !ok {
+			continue
+		}
+		var sample cpuSample
+		if err := json.Unmarshal([]byte(strings.TrimSpace(payload)), &sample); err != nil {
+			return nil, fmt.Errorf("opnsense: GET %s: decode event: %w", cpuStreamPath, err)
+		}
+		used := min(max(sample.Total, 0), 100)
+		return &used, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("opnsense: GET %s: read stream: %w", cpuStreamPath, err)
+	}
+	return nil, fmt.Errorf("opnsense: GET %s: stream ended before the first event", cpuStreamPath)
 }
 
 // parseNumber acepta el número JSON y la cadena decimal que devuelve la API.

@@ -10,6 +10,7 @@ Status: **beta, validated against OPNsense 26.7 in a VM and on a user unit, stil
 - The ethernet interfaces are also announced as ports (`fdb.ports`), which is what lets the dashboard show their counters. Loopback, `pflog`, `pfsync` and `enc` are excluded, and no negotiated speed is reported because the API does not expose it.
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
 - Memory from `system_resources` and the hottest sensor from `system_temperature`. Both are best effort: a user without the dashboard privilege keeps the counters and the ARP.
+- Uptime and load average from `system_time`, and CPU usage from the first event of `cpu_usage/stream`. The firewall serves the CPU as an SSE stream that never ends by itself, so the pusher reads one event and closes the connection. These are best effort too. The load average travels in the payload for parity with the native agent, which reports it from ubus, but the dashboard does not render it yet.
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
 - Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable.
@@ -23,7 +24,7 @@ All requests use GET. The integration does not write OPNsense configuration, ins
 - The first WAN poll establishes a counter baseline and emits no rate. Counter resets also emit no rate for that sample.
 - Link state, negotiated speed and WAN IP/gateway/DNS are not inferred from interface statistics.
 - NDP/IPv6 neighbor data is not mixed into the IPv4-only ARP payload.
-- DHCP leases, aliases, gateways, CPU, load and uptime are outside this first slice.
+- DHCP leases, aliases and gateways are outside this first slice.
 
 ## API privileges
 
@@ -41,6 +42,12 @@ no more:
 without it. Every request the pusher makes lives in the `diagnostics` module. The
 interface label lookup is best effort and falls back to the raw interface name
 when the user cannot read it.
+
+On OPNsense 26.7 these three privileges also answer `system_time`,
+`system_resources`, `system_temperature` and `cpu_usage/stream` (reported in
+#55), so the system vitals need no extra grant. `activity/get_activity` does
+answer 403 with them and would need `Diagnostics: System Activity`, which is why
+the pusher reads the CPU stream instead.
 
 ## Managed NetPulse installation
 

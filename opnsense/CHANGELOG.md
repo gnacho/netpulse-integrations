@@ -12,4 +12,5 @@
 - `OPNSENSE_CERT_FP` accepts the colon separated fingerprint printed by the OPNsense GUI.
 - The ethernet interfaces are announced as ports, so the dashboard shows their counters. There is no speed and no link description beyond the interface name.
 - Reports memory and the hottest temperature sensor, both best effort, so a missing dashboard privilege does not cost the counters.
+- Reports uptime and load average from `system_time`, and CPU usage from the first event of the `cpu_usage/stream` SSE feed.
 - Validation on user hardware is still required before marking the integration stable.

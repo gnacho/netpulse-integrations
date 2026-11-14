@@ -1,0 +1,5 @@
+event: message
+data: {"total":8,"user":5,"nice":0,"sys":3,"intr":0,"idle":92}
+
+event: message
+data: {"total":55,"user":40,"nice":0,"sys":15,"intr":0,"idle":45}

@@ -13,4 +13,5 @@
 - The ethernet interfaces are announced as ports, so the dashboard shows their counters. There is no speed and no link description beyond the interface name.
 - Reports memory and the hottest temperature sensor, both best effort, so a missing dashboard privilege does not cost the counters.
 - Reports uptime and load average from `system_time`, and CPU usage from the first event of the `cpu_usage/stream` SSE feed.
+- Reports per-client traffic from `traffic/top` by integrating the sampled rates into per-MAC totals, with the ARP table as the IP to MAC bridge.
 - Validation on user hardware is still required before marking the integration stable.

@@ -35,17 +35,36 @@ type Config struct {
 	CertFP       string
 	Timeout      time.Duration
 	WANInterface string
+	// TrafficInterfaces: logical OPNsense interface names whose per-host rates
+	// feed the client traffic section, comma separated ("lan", "lan,opt1").
+	// OPNsense accepts them in one call. Empty means "lan".
+	TrafficInterfaces string
 }
 
 type Poller struct {
 	cfg    Config
 	base   string
 	client *http.Client
-	err    error
-	now    func() time.Time
+	// trafficClient: traffic/top tarda lo que tarde iftop en muestrear (2 s)
+	// más las resoluciones inversas, y el script se corta a los 10 s, así que
+	// necesita más margen que el resto de peticiones.
+	trafficClient *http.Client
+	err           error
+	now           func() time.Time
 
 	mu   sync.Mutex
 	prev *wanSample
+	// bw: bytes acumulados por MAC, integrados a partir de la tasa medida.
+	// bwAt: instante de la última muestra buena de tráfico por cliente.
+	bw   map[string]bwCounters
+	bwAt time.Time
+}
+
+// bwCounters: bytes acumulados de un cliente. La API no da contadores de por
+// vida para un host, solo tasas, así que el pusher integra cada muestra y
+// guarda el total en el formato que espera el servidor (#65).
+type bwCounters struct {
+	rx, tx float64
 }
 
 type wanSample struct {
@@ -62,6 +81,9 @@ func New(cfg Config) *Poller {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
+	if strings.TrimSpace(cfg.TrafficInterfaces) == "" {
+		cfg.TrafficInterfaces = defaultTrafficInterfaces
+	}
 	base, err := normalizeBase(cfg.Host)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	tlsConfig, tlsErr := buildTLSConfig(cfg)
@@ -70,11 +92,12 @@ func New(cfg Config) *Poller {
 	}
 	transport.TLSClientConfig = tlsConfig
 	return &Poller{
-		cfg:    cfg,
-		base:   base,
-		client: &http.Client{Timeout: cfg.Timeout, Transport: transport},
-		err:    err,
-		now:    time.Now,
+		cfg:           cfg,
+		base:          base,
+		client:        &http.Client{Timeout: cfg.Timeout, Transport: transport},
+		trafficClient: &http.Client{Timeout: trafficTimeout, Transport: transport},
+		err:           err,
+		now:           time.Now,
 	}
 }
 
@@ -221,8 +244,33 @@ const (
 	cpuStreamPath = "/api/diagnostics/cpu_usage/stream"
 	// cpuStreamWait acota esa lectura. El bucle del pusher se queda esperando
 	// el evento, así que no puede colgarse con el stream abierto.
-	cpuStreamWait = 5 * time.Second
+	cpuStreamWait  = 5 * time.Second
+	trafficTopPath = "/api/diagnostics/traffic/top/"
+	// trafficTimeout: iftop muestrea 2 s y el script se corta a los 10 s (más
+	// las resoluciones inversas), así que esta petición necesita más margen que
+	// el resto.
+	trafficTimeout = 12 * time.Second
+	// defaultTrafficInterfaces: la interfaz lógica que OPNsense asigna a la LAN
+	// por defecto. Un firewall con la LAN renombrada solo tiene que decirlo.
+	defaultTrafficInterfaces = "lan"
 )
+
+// trafficInterface: respuesta de traffic/top por interfaz. `status` es "ok" o
+// "timeout" (iftop no respondió a tiempo).
+type trafficInterface struct {
+	Status  string          `json:"status"`
+	Records []trafficRecord `json:"records"`
+}
+
+// trafficRecord: un host de esa interfaz tal como lo mide iftop en una ventana
+// de 2 s. Las tasas van en bit/s y `cumulative_bytes` cubre SOLO esa ventana,
+// no la vida del host, así que no sirve como contador (#65).
+type trafficRecord struct {
+	Address     string `json:"address"`
+	RateBits    int64  `json:"rate_bits"`
+	RateBitsIn  int64  `json:"rate_bits_in"`
+	RateBitsOut int64  `json:"rate_bits_out"`
+}
 
 // uptimePattern: "HH:MM:SS" sin días y "N days, HH:MM:SS" con ellos. Es el
 // formato literal de formatUptime() en OPNsense (day en singular con 1).
@@ -319,7 +367,109 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if cpu, err := p.cpuUsage(ctx); err == nil {
 		data.System.CPU = cpu
 	}
+	if bw := p.clientTraffic(ctx, invertARP(data.Arp)); bw != nil {
+		data.ClientBw = bw
+	}
 	return data, nil
+}
+
+// invertARP: el payload lleva MAC -> IPv4 y traffic/top viene por IP.
+func invertARP(arp map[string]string) map[string]string {
+	out := make(map[string]string, len(arp))
+	for mac, ip := range arp {
+		if ip != "" {
+			out[ip] = mac
+		}
+	}
+	return out
+}
+
+// trafficPath valida la lista de interfaces lógicas (lan, wan, opt1) y arma la
+// ruta. OPNsense las acepta en una sola llamada separadas por comas.
+func trafficPath(raw string) (string, bool) {
+	list := strings.ToLower(strings.TrimSpace(raw))
+	if list == "" {
+		return "", false
+	}
+	for _, r := range list {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != ',' {
+			return "", false
+		}
+	}
+	return trafficTopPath + list, true
+}
+
+// clientTraffic arma la sección clientBw con el tráfico por cliente (#65). La
+// API no da contadores de por vida por host, solo la tasa que iftop mide en
+// una ventana de 2 s, así que cada muestra se integra en un total por MAC
+// (el ARP da la correspondencia IP -> MAC). El servidor diferencia esos
+// totales entre pushes, así que la cifra que llega a la lista de clientes es
+// una media de las muestras, no bytes contados por el firewall. Un host cuya
+// IP no esté en el ARP se descarta: sin MAC no hay cliente que pintar.
+func (p *Poller) clientTraffic(ctx context.Context, macByIP map[string]string) *probe.ClientBwData {
+	if len(macByIP) == 0 {
+		return nil
+	}
+	path, ok := trafficPath(p.cfg.TrafficInterfaces)
+	if !ok {
+		return nil
+	}
+	var top map[string]trafficInterface
+	if err := p.getWith(ctx, p.trafficClient, path, &top); err != nil {
+		// Muestra fallida: no se integra nada y el siguiente éxito arranca una
+		// ventana nueva, para no inventar tráfico del hueco.
+		p.mu.Lock()
+		p.bwAt = time.Time{}
+		p.mu.Unlock()
+		// Sin el privilegio no es un fallo pasajero: se declara la fuente como
+		// no disponible para que el servidor no reutilice los últimos
+		// contadores y escriba ceros falsos en el histórico del cliente.
+		var authErr *AuthenticationError
+		if errors.As(err, &authErr) {
+			return &probe.ClientBwData{Available: false}
+		}
+		return nil
+	}
+	now := p.now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	elapsed := 0.0
+	if !p.bwAt.IsZero() {
+		if seconds := now.Sub(p.bwAt).Seconds(); seconds > 0 {
+			elapsed = seconds
+		}
+	}
+	p.bwAt = now
+	if elapsed == 0 {
+		// Primera muestra: solo sirve de referencia temporal.
+		return nil
+	}
+	if p.bw == nil {
+		p.bw = map[string]bwCounters{}
+	}
+	for _, intf := range top {
+		if intf.Status != "ok" {
+			continue
+		}
+		for _, record := range intf.Records {
+			mac := macByIP[record.Address]
+			if mac == "" {
+				continue
+			}
+			c := p.bw[mac]
+			c.rx += float64(record.RateBitsIn) * elapsed / 8
+			c.tx += float64(record.RateBitsOut) * elapsed / 8
+			p.bw[mac] = c
+		}
+	}
+	if len(p.bw) == 0 {
+		return nil
+	}
+	hosts := make(map[string]probe.NlbwCounter, len(p.bw))
+	for mac, c := range p.bw {
+		hosts[mac] = probe.NlbwCounter{RxBytes: uint64(c.rx), TxBytes: uint64(c.tx)}
+	}
+	return &probe.ClientBwData{Available: true, Hosts: hosts}
 }
 
 // parseUptime convierte el texto de system_time en segundos. Un formato
@@ -458,12 +608,18 @@ func (p *Poller) wanRates(counters probe.IfCounters) (*float64, *float64) {
 }
 
 func (p *Poller) get(ctx context.Context, path string, out any) error {
+	return p.getWith(ctx, p.client, path, out)
+}
+
+// getWith: la misma petición con un cliente distinto, para las rutas que
+// necesitan más plazo que el resto.
+func (p *Poller) getWith(ctx context.Context, client *http.Client, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+path, nil)
 	if err != nil {
 		return fmt.Errorf("opnsense: build request: %w", err)
 	}
 	req.SetBasicAuth(p.cfg.APIKey, p.cfg.APISecret)
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("opnsense: GET %s: %w", path, err)
 	}

@@ -457,6 +457,9 @@ func (p *Poller) clientTraffic(ctx context.Context, macByIP map[string]string) *
 				continue
 			}
 			c := p.bw[mac]
+			// En la interfaz lan, rate_bits_in es tráfico hacia el host (su
+			// descarga) y rate_bits_out el que sale de él: comprobado con una
+			// descarga conocida sobre top/lan (#65).
 			c.rx += float64(record.RateBitsIn) * elapsed / 8
 			c.tx += float64(record.RateBitsOut) * elapsed / 8
 			p.bw[mac] = c

@@ -5,6 +5,12 @@ follows Keep a Changelog and semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Decode IDNA hostname fallbacks for display using golang.org/x/net/idna; preserve explicit controller aliases and the input on conversion errors.
+
+- Client names (the controller alias, else the announced hostname) and the names of switches and access points are forwarded as `dhcp.reservations`, so NetPulse shows them instead of bare MAC addresses. Blank names and names that only repeat the MAC are skipped.
+
 ### Changed
 
 - Rejected credentials (401/403 on the login or on the site queries) are

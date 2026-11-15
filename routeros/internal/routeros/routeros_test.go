@@ -1093,5 +1093,14 @@ func fixtureAPIReplies() map[string][][]byte {
 			testSentence("!re", "=dst-address=0.0.0.0/0", "=interface=ether1", "=gateway=192.168.1.1"),
 			done,
 		},
+		// #74: este fixture es un router sin radios, así que los dos menús
+		// inalámbricos responden con un trap de menú ausente y el payload sale
+		// sin sección wireless, como antes.
+		"/interface/wifi/registration-table/print": {
+			testSentence("!trap", "=message=no such command or directory (wifi)"),
+		},
+		"/interface/wireless/registration-table/print": {
+			testSentence("!trap", "=message=no such command or directory (wireless)"),
+		},
 	}
 }

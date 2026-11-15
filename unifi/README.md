@@ -56,7 +56,7 @@ Standalone binary environment:
 
 | Variable | Meaning |
 | --- | --- |
-| `UNIFI_HOST` | Controller base URL, or host[:port] (https and 8443 assumed when the scheme is missing). Required. |
+| `UNIFI_HOST` | Controller base URL, or host[:port]. A URL or an explicit port is used as given. A bare host tries the console port 443 first and falls back to the standalone controller port 8443. Required. |
 | `UNIFI_USER` | Local controller user with read access. Required. |
 | `UNIFI_PASS` | Password for that user. Required. |
 | `UNIFI_SITE` | Site name. Defaults to `default`. |
@@ -70,6 +70,12 @@ poller has no workaround for it.
 
 ## Limits
 
+- UniFi OS consoles answer on 443, standalone controllers on 8443. A bare host
+  in the configuration tries both, in that order, so one address works for
+  either install. Setting the URL with its port skips the guess.
+- Some UniFi OS builds accept the login on `/api/auth/login` but only serve the
+  site API under `/proxy/network`. The site queries retry the other prefix once
+  before failing, so that pair works too (#63).
 - Authentication failures are terminal: rejected credentials (401/403 on the
   login or on the site queries) stop the poller with an alert instead of
   retrying the login every cycle, so a wrong password cannot trip the

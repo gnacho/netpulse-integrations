@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gnacho/netpulse/agent/probe"
@@ -44,9 +45,14 @@ type Config struct {
 
 // Poller reads the controller inventory on demand. It holds no session: every
 // Poll logs in again, which keeps the client stateless across supervisor
-// restarts.
+// restarts. The only thing it remembers is which base URL answered, so a
+// controller reached on the second port does not pay a failed connection every
+// cycle.
 type Poller struct {
 	cfg Config
+
+	mu   sync.Mutex
+	base string
 }
 
 // New builds a poller. A zero timeout becomes ten seconds.
@@ -70,22 +76,72 @@ func (e *AuthenticationError) Terminal() bool { return true }
 // Poll logs in, reads devices and clients and translates them into the
 // neutral payload.
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
-	c, err := newController(p.cfg)
-	if err != nil {
-		return nil, err
+	data, _, err := p.collect(ctx)
+	return data, err
+}
+
+// collect polls with the candidate base URLs of the configuration.
+func (p *Poller) collect(ctx context.Context) (*probe.PayloadData, string, error) {
+	return p.collectFrom(ctx, p.candidateBases())
+}
+
+// collectFrom walks the given base URLs until one answers with a session and a
+// payload. Rejected credentials stop the walk: retrying them on another port
+// feeds the failed-login counter for nothing.
+func (p *Poller) collectFrom(ctx context.Context, bases []string) (*probe.PayloadData, string, error) {
+	if len(bases) == 0 {
+		return nil, "", errors.New("unifi: controller host is empty")
 	}
-	if err := c.login(ctx); err != nil {
-		return nil, err
+	var lastErr error
+	failures := make([]string, 0, len(bases))
+	for _, base := range bases {
+		c, err := newController(p.cfg, base)
+		if err != nil {
+			return nil, "", err
+		}
+		data, err := c.poll(ctx)
+		if err == nil {
+			p.remember(base)
+			return data, base, nil
+		}
+		var authErr *AuthenticationError
+		if errors.As(err, &authErr) {
+			return nil, "", err
+		}
+		lastErr = err
+		failures = append(failures, fmt.Sprintf("%s -> %v", base, err))
 	}
-	devs, err := c.devices(ctx)
-	if err != nil {
-		return nil, err
+	if len(failures) > 1 {
+		return nil, "", fmt.Errorf("%w (bases: %s)", lastErr, strings.Join(failures, ", "))
 	}
-	cls, err := c.clients(ctx)
-	if err != nil {
-		return nil, err
+	return nil, "", lastErr
+}
+
+// candidateBases lists the base URLs in the order they are tried: the one that
+// answered last time first, then the rest.
+func (p *Poller) candidateBases() []string {
+	all := resolveBases(p.cfg.Host)
+	p.mu.Lock()
+	remembered := p.base
+	p.mu.Unlock()
+	if remembered == "" || len(all) < 2 {
+		return all
 	}
-	return buildPayload(devs, cls), nil
+	out := make([]string, 0, len(all))
+	out = append(out, remembered)
+	for _, b := range all {
+		if b != remembered {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// remember keeps the base URL that answered so the next poll starts there.
+func (p *Poller) remember(base string) {
+	p.mu.Lock()
+	p.base = base
+	p.mu.Unlock()
 }
 
 // controller is a logged-in HTTP session against one controller base URL.
@@ -99,8 +155,7 @@ type controller struct {
 	pass   string
 }
 
-func newController(cfg Config) (*controller, error) {
-	base := resolveBase(cfg.Host)
+func newController(cfg Config, base string) (*controller, error) {
 	if base == "" {
 		return nil, errors.New("unifi: controller host is empty")
 	}
@@ -125,22 +180,29 @@ func newController(cfg Config) (*controller, error) {
 	return c, nil
 }
 
-// resolveBase keeps explicit URLs as they are and upgrades bare hosts to
-// https, adding the conventional controller port 8443 when the host carries
-// no port of its own.
-func resolveBase(host string) string {
+// legacyPort is where the standalone, self-hosted controller serves its API.
+// UniFi OS consoles answer on 443 instead.
+const legacyPort = ":8443"
+
+// resolveBases lists the controller base URLs to try, in order. An explicit
+// URL or a host with a port keeps that port: the operator already said where
+// the API is. A bare host means the console port first and the legacy
+// standalone port second. Guessing only 8443 made every request to a UniFi OS
+// console land on a path that does not exist, which also buried the real cause
+// behind a 404 (#63).
+func resolveBases(host string) []string {
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return ""
-	}
-	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
-		return strings.TrimRight(host, "/")
+		return nil
 	}
 	host = strings.TrimRight(host, "/")
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return "https://" + host
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return []string{host}
 	}
-	return "https://" + host + ":8443"
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return []string{"https://" + host}
+	}
+	return []string{"https://" + host, "https://" + host + legacyPort}
 }
 
 // login posts the credentials to the UniFi OS endpoint first and to the
@@ -196,9 +258,60 @@ func (c *controller) login(ctx context.Context) error {
 	return fmt.Errorf("unifi: login failed on all endpoints: %w (attempts: %s)", lastErr, detail)
 }
 
-// get fetches one site-scoped endpoint of the logged-in session.
+// poll logs in and reads one full snapshot from this base URL.
+func (c *controller) poll(ctx context.Context) (*probe.PayloadData, error) {
+	if err := c.login(ctx); err != nil {
+		return nil, err
+	}
+	devs, err := c.devices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cls, err := c.clients(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return buildPayload(devs, cls), nil
+}
+
+// get fetches one site-scoped endpoint of the logged-in session. UniFi OS
+// builds exist that accept the login on /api/auth/login but only serve the
+// site API under /proxy/network, so a rejection on the prefix we logged in
+// with is retried on the other prefix before failing (#63).
 func (c *controller) get(ctx context.Context, endpoint string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+c.prefix+"/api/s/"+c.site+"/"+endpoint, nil)
+	var authErr error
+	var lastErr error
+	for _, prefix := range c.prefixOrder() {
+		err := c.getWithPrefix(ctx, prefix, endpoint, out)
+		if err == nil {
+			c.prefix = prefix
+			return nil
+		}
+		var a *AuthenticationError
+		if errors.As(err, &a) {
+			if authErr == nil {
+				authErr = err
+			}
+			continue
+		}
+		lastErr = err
+	}
+	if authErr != nil {
+		return authErr
+	}
+	return lastErr
+}
+
+// prefixOrder tries the prefix the login landed on first, then the other one.
+func (c *controller) prefixOrder() []string {
+	if c.prefix == "" {
+		return []string{"", "/proxy/network"}
+	}
+	return []string{c.prefix, ""}
+}
+
+func (c *controller) getWithPrefix(ctx context.Context, prefix, endpoint string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+prefix+"/api/s/"+c.site+"/"+endpoint, nil)
 	if err != nil {
 		return err
 	}

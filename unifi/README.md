@@ -28,9 +28,12 @@ Only two endpoints of one site, plus the login:
 | Device `uplink` | `fdb.macs` | Each switch and AP is attached to a port of its parent, so the topology hangs together without LLDP. |
 | Wireless client radio + signal | `wireless.clients` | Signal in dBm (falls back to `rssi` when absent), band mapped from the radio name (`na` to 5 GHz, `6e` to 6 GHz, otherwise 2.4 GHz). |
 | Client and device IP addresses | `arp` | MAC to latest known IP. |
-| Client `name`, then `hostname` | `dhcp.reservations` | The alias set in the controller wins over the hostname the client announced. Blank values and a name that is only the MAC are skipped, so an unnamed client still shows as its MAC. IDNA hostnames (`xn--...`) are decoded with `idna.Display.ToUnicode`; conversion errors preserve the input, and explicit aliases are untouched. |
+| Client `name`, then `hostname` | `dhcp.reservations` | The alias set in the controller wins over the hostname the client announced. Blank values and a name that is only the MAC are skipped, so an unnamed client still shows as its MAC. An internationalised hostname is forwarded exactly as the controller reports it, A label included. |
 | Switch and AP `name` | `dhcp.reservations` | Names the device wherever it appears in the device list. An unnamed device stays unnamed. |
-| Gateway device | `system.board`, `system.sysinfo.uptime`, `system.bridgeMac` | Uptime and identity of the gateway; CPU and temperature are not read. |
+| Gateway `wan1`/`wan2` rates | `system.rxBps`, `system.txBps`, `system.latencyMs` | The active WAN (WAN1, or WAN2 when WAN1 is down). Rates are converted from bytes per second to bits per second, and a missing reading stays absent. |
+| Port `rx_bytes`/`tx_bytes` and rates | `fdb.ports` | Gateway ports are emitted too, because switch uplinks point at them and the WAN port carries the internet traffic. The WAN port of a gateway is labelled `WAN` when the controller only gives it a generic `Port N`. |
+| Client traffic counters | `clientBw` | Cumulative bytes per client. Download is what the controller sends to the client, the same convention every other traffic source in NetPulse uses, so the server does the deltas between pushes. Clients with no counters are not emitted. |
+| Gateway device | `system.board`, `system.sysinfo.uptime`, `system.bridgeMac` | Uptime and identity of the gateway. CPU and temperature are not read. |
 
 Names are sent as static reservations (a name pinned to a MAC, no address)
 because the server uses those for hosts without a lease. Reading them from a
@@ -38,9 +41,11 @@ dhcp lease would claim this poller is the DHCP server, so no leases are sent.
 The server still prefers a hostname from a real lease elsewhere on the network,
 and a name set by hand in NetPulse overrides both.
 
-Everything else in the shared payload (DHCP leases, per-interface counters,
-VLANs, LLDP, roaming) has no verified match in this read-only surface and is
-not emitted.
+Everything else in the shared payload (DHCP leases, per-interface `netIf`
+counters, VLANs, LLDP, roaming) has no verified match in this read-only
+surface and is not emitted. Traffic counters travel on the ports and on
+`clientBw` instead, so `netIf` stays empty and the server does not list the
+same interfaces a second time.
 
 ## Configuration
 
@@ -90,7 +95,7 @@ poller has no workaround for it.
   controller's brute-force protection. Fix the credentials and restart the
   service to recover. Transient network errors keep being retried.
 - HTTPS to the NetPulse server needs the supervisor config to carry
-  `server_fp` (SPKI SHA-256 pin) or `ca_file`; either one alone, never both.
+  `server_fp` (SPKI SHA-256 pin) or `ca_file`, either one alone, never both.
   Plain HTTP works without either.
 - Read-only by design: no adoption, no configuration, no firmware actions, and
   no cloud access.

@@ -487,3 +487,69 @@ func TestPollTransientErrorsStayRetryable(t *testing.T) {
 		}
 	})
 }
+
+// #70: the prefix the login landed on is not necessarily the prefix the site
+// API lives under. A 401 on the wrong prefix says nothing about the session,
+// so a non-auth failure on the other prefix must be the error reported, and it
+// must stay retryable instead of killing the pusher.
+func TestSiteQueryAuthOnWrongPrefixStaysRetryable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "api.err.LoginRequired", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "gateway hiccup", http.StatusBadGateway)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	_, err := p.Poll(context.Background())
+	if err == nil {
+		t.Fatal("Poll must fail while the site API answers 502")
+	}
+	var authErr *AuthenticationError
+	if errors.As(err, &authErr) {
+		t.Fatalf("a 401 on the wrong prefix is not rejected credentials: %v", err)
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Fatalf("error must report the non-auth failure of the other prefix, got: %v", err)
+	}
+}
+
+// #70: terminal only when every prefix rejects the session.
+func TestSiteQueryAuthOnEveryPrefixIsTerminal(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "api.err.LoginRequired", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "api.err.LoginRequired", http.StatusUnauthorized)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	_, err := p.Poll(context.Background())
+	if err == nil {
+		t.Fatal("Poll must fail when every prefix rejects the session")
+	}
+	terminal, ok := err.(interface{ Terminal() bool })
+	if !ok || !terminal.Terminal() {
+		t.Fatalf("a session rejected on every prefix must stay terminal, got: %v", err)
+	}
+}

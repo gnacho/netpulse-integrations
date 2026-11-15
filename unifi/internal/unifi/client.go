@@ -277,10 +277,13 @@ func (c *controller) poll(ctx context.Context) (*probe.PayloadData, error) {
 // get fetches one site-scoped endpoint of the logged-in session. UniFi OS
 // builds exist that accept the login on /api/auth/login but only serve the
 // site API under /proxy/network, so a rejection on the prefix we logged in
-// with is retried on the other prefix before failing (#63).
+// with is retried on the other prefix before failing (#63). A 401 on that
+// first prefix is not a verdict on the session: the prefix can be the wrong
+// half of the pair, so a non-auth failure on the other prefix is the one that
+// gets reported and stays retryable. Only a rejection on every prefix ends as
+// an authentication error (#70).
 func (c *controller) get(ctx context.Context, endpoint string, out any) error {
-	var authErr error
-	var lastErr error
+	var authErr, liveErr, missingErr error
 	for _, prefix := range c.prefixOrder() {
 		err := c.getWithPrefix(ctx, prefix, endpoint, out)
 		if err == nil {
@@ -294,12 +297,38 @@ func (c *controller) get(ctx context.Context, endpoint string, out any) error {
 			}
 			continue
 		}
-		lastErr = err
+		var e *endpointError
+		if errors.As(err, &e) && e.status == http.StatusNotFound {
+			if missingErr == nil {
+				missingErr = err
+			}
+			continue
+		}
+		liveErr = err
+	}
+	if liveErr != nil {
+		if authErr != nil {
+			return fmt.Errorf("%w (another prefix answered: %v)", liveErr, authErr)
+		}
+		return liveErr
 	}
 	if authErr != nil {
 		return authErr
 	}
-	return lastErr
+	return missingErr
+}
+
+// endpointError keeps the status of a site query that did not answer 200, so a
+// caller can tell a route that does not exist on that prefix from a route that
+// exists and is failing.
+type endpointError struct {
+	endpoint string
+	status   int
+	detail   string
+}
+
+func (e *endpointError) Error() string {
+	return fmt.Sprintf("unifi: GET %s: %d %s: %s", e.endpoint, e.status, http.StatusText(e.status), e.detail)
 }
 
 // prefixOrder tries the prefix the login landed on first, then the other one.
@@ -327,7 +356,7 @@ func (c *controller) getWithPrefix(ctx context.Context, prefix, endpoint string,
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
-		return fmt.Errorf("unifi: GET %s: %s: %s", endpoint, resp.Status, body)
+		return &endpointError{endpoint: endpoint, status: resp.StatusCode, detail: strings.TrimSpace(string(body))}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

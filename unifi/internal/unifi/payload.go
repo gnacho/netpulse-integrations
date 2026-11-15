@@ -1,6 +1,7 @@
 package unifi
 
 import (
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,20 +22,49 @@ type rawDevice struct {
 	Version   string     `json:"version"`
 	Uplink    *rawUplink `json:"uplink"`
 	PortTable []rawPort  `json:"port_table"`
+	// Wan1 and Wan2 are only present on gateways. The top-level rx_bytes and
+	// tx_bytes of a gateway are not used: on some consoles they are swapped
+	// relative to the WAN object, which is the reliable source.
+	Wan1 *rawWAN `json:"wan1"`
+	Wan2 *rawWAN `json:"wan2"`
+}
+
+// rawWAN is one internet connection of a gateway. Counters are cumulative
+// bytes, rx is the download from the internet. The -r fields are bytes per
+// second and stay nil when the controller omits them, so a missing reading
+// is not reported as zero traffic.
+type rawWAN struct {
+	IP      string   `json:"ip"`
+	IfName  string   `json:"ifname"`
+	PortIdx int      `json:"port_idx"`
+	Up      *bool    `json:"up"`
+	Latency float64  `json:"latency"`
+	RxRate  *float64 `json:"rx_bytes-r"`
+	TxRate  *float64 `json:"tx_bytes-r"`
 }
 
 type rawUplink struct {
 	UplinkMAC        string `json:"uplink_mac"`
 	UplinkRemotePort int    `json:"uplink_remote_port"`
+	// Gateways is the next hop list of a gateway, IPv6 link-local entries
+	// included.
+	Gateways []string `json:"gateways"`
 }
 
 // rawPort covers both field spellings controllers have used for the up state.
+// Counters are cumulative bytes; the -r rates are bytes per second and nil
+// when absent (access points report no rate).
 type rawPort struct {
-	PortIdx int    `json:"port_idx"`
-	Name    string `json:"name"`
-	Up      *bool  `json:"up"`
-	PortUp  *bool  `json:"port_up"`
-	Speed   int    `json:"speed"`
+	PortIdx  int      `json:"port_idx"`
+	Name     string   `json:"name"`
+	Up       *bool    `json:"up"`
+	PortUp   *bool    `json:"port_up"`
+	Speed    int      `json:"speed"`
+	IsUplink bool     `json:"is_uplink"`
+	RxBytes  uint64   `json:"rx_bytes"`
+	TxBytes  uint64   `json:"tx_bytes"`
+	RxRate   *float64 `json:"rx_bytes-r"`
+	TxRate   *float64 `json:"tx_bytes-r"`
 }
 
 // rawClient is one entry of stat/sta. Wired clients carry sw_mac plus
@@ -53,6 +83,12 @@ type rawClient struct {
 	Radio      string `json:"radio"`
 	Signal     int    `json:"signal"`
 	RSSI       int    `json:"rssi"`
+	// Counters are seen from the network, so tx_bytes is what was sent to
+	// the client (its download). Wired clients carry them as wired-*.
+	RxBytes      uint64  `json:"rx_bytes"`
+	TxBytes      uint64  `json:"tx_bytes"`
+	WiredRxBytes *uint64 `json:"wired-rx_bytes"`
+	WiredTxBytes *uint64 `json:"wired-tx_bytes"`
 }
 
 // kind reduces the controller device type to the three families the payload
@@ -83,6 +119,71 @@ func (p rawPort) isUp() bool {
 }
 
 func (c rawClient) mac() string { return normalizeMAC(c.MAC) }
+
+// traffic returns what the client downloaded and uploaded, in cumulative
+// bytes. The controller counts from the network side, so its tx_bytes is the
+// client's download. Wired clients use the wired-* counters when present.
+func (c rawClient) traffic() (down, up uint64) {
+	if c.IsWired && (c.WiredRxBytes != nil || c.WiredTxBytes != nil) {
+		if c.WiredTxBytes != nil {
+			down = *c.WiredTxBytes
+		}
+		if c.WiredRxBytes != nil {
+			up = *c.WiredRxBytes
+		}
+		return down, up
+	}
+	return c.TxBytes, c.RxBytes
+}
+
+// bitsPerSecond converts a bytes-per-second reading to bits per second,
+// keeping nil for a missing reading.
+func bitsPerSecond(bytesPerSec *float64) *float64 {
+	if bytesPerSec == nil {
+		return nil
+	}
+	v := *bytesPerSec * 8
+	return &v
+}
+
+// activeWAN picks the connection that carries traffic: the first one marked
+// up, else the primary one. Nil when the device reports no WAN object.
+func (d rawDevice) activeWAN() *rawWAN {
+	for _, w := range []*rawWAN{d.Wan1, d.Wan2} {
+		if w != nil && w.Up != nil && *w.Up {
+			return w
+		}
+	}
+	if d.Wan1 != nil {
+		return d.Wan1
+	}
+	return d.Wan2
+}
+
+// firstIPv4 returns the first IPv4 address of the list, skipping IPv6.
+func firstIPv4(addrs []string) string {
+	for _, a := range addrs {
+		if ip := net.ParseIP(strings.TrimSpace(a)); ip != nil && ip.To4() != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+// portLabel is the name shown for a port: the controller name, else "WAN" for
+// the uplink port of a gateway, else "Port N". A gateway names its WAN port
+// with the generic "Port N" by default, which says less than "WAN".
+func portLabel(pt rawPort, gateway bool) string {
+	label := strings.TrimSpace(pt.Name)
+	generic := "Port " + strconv.Itoa(pt.PortIdx)
+	if gateway && pt.IsUplink && (label == "" || label == generic) {
+		return "WAN"
+	}
+	if label == "" {
+		return generic
+	}
+	return label
+}
 
 // label is the name shown for the client: the controller alias first, then
 // the hostname the client announced. Empty when the controller knows neither.
@@ -150,22 +251,28 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 	macs := map[string]string{}
 	ports := make([]probe.EthPort, 0)
 	for _, d := range devs {
-		if d.kind() != "switch" {
+		// Gateway ports are emitted too: switch uplinks point at them, and
+		// the WAN port carries the internet traffic. Counters and rates
+		// travel on the port itself (rates are given by the controller, so
+		// no NetIf section is needed; the server would only recompute them
+		// and list the same interfaces a second time as virtual ports).
+		k := d.kind()
+		if k != "switch" && k != "gateway" {
 			continue
 		}
 		for _, pt := range d.PortTable {
 			if pt.PortIdx <= 0 {
 				continue
 			}
-			label := strings.TrimSpace(pt.Name)
-			if label == "" {
-				label = "Port " + strconv.Itoa(pt.PortIdx)
-			}
 			ports = append(ports, probe.EthPort{
-				ID:    portID(d.MAC, pt.PortIdx),
-				Label: label,
-				Up:    pt.isUp(),
-				Speed: speedLabel(pt.Speed),
+				ID:      portID(d.MAC, pt.PortIdx),
+				Label:   portLabel(pt, k == "gateway"),
+				Up:      pt.isUp(),
+				Speed:   speedLabel(pt.Speed),
+				RxBytes: pt.RxBytes,
+				TxBytes: pt.TxBytes,
+				RxBps:   bitsPerSecond(pt.RxRate),
+				TxBps:   bitsPerSecond(pt.TxRate),
 			})
 		}
 	}
@@ -205,6 +312,9 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 
 	wireless := map[string]probe.WirelessClient{}
 	arp := map[string]string{}
+	// Hosts is non-nil on purpose: an empty map means "no clients", nil
+	// would make the server keep the last data.
+	hosts := map[string]probe.NlbwCounter{}
 	for _, c := range cls {
 		mac := c.mac()
 		if mac == "" {
@@ -216,6 +326,10 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 		if n := c.label(); n != "" {
 			names[mac] = n
 		}
+		// ClientBw follows the nlbwmon convention: rx is the host's download.
+		if down, up := c.traffic(); down > 0 || up > 0 {
+			hosts[mac] = probe.NlbwCounter{RxBytes: down, TxBytes: up}
+		}
 		if c.IsWired {
 			if c.SwitchPort > 0 && strings.TrimSpace(c.SwitchMAC) != "" {
 				macs[mac] = portID(c.SwitchMAC, c.SwitchPort)
@@ -225,6 +339,7 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 		wireless[mac] = probe.WirelessClient{SignalDbm: c.signalDbm(), Band: band(c.Radio)}
 	}
 	data.Wireless = &probe.WirelessData{Clients: wireless}
+	data.ClientBw = &probe.ClientBwData{Available: true, Hosts: hosts}
 	if len(arp) > 0 {
 		data.Arp = arp
 	}
@@ -253,6 +368,21 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 			BridgeMAC: d.mac(),
 			SysInfo:   &probe.SysInfo{Uptime: float64(d.Uptime)},
 			Board:     board,
+		}
+		if w := d.activeWAN(); w != nil {
+			// The WAN rates are what the server shows as internet throughput
+			// (bits per second, rx = download).
+			data.System.RxBps = bitsPerSecond(w.RxRate)
+			data.System.TxBps = bitsPerSecond(w.TxRate)
+			if w.Latency > 0 {
+				lat := w.Latency
+				data.System.LatencyMs = &lat
+			}
+			info := &probe.WanInfo{IP: strings.TrimSpace(w.IP), Device: w.IfName, Port: w.IfName}
+			if d.Uplink != nil {
+				info.Gateway = firstIPv4(d.Uplink.Gateways)
+			}
+			data.Wan = info
 		}
 		break
 	}

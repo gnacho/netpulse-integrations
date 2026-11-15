@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -262,24 +263,114 @@ func TestSpeedLabel(t *testing.T) {
 	}
 }
 
-func TestResolveBase(t *testing.T) {
-	cases := map[string]string{
-		"192.168.1.2":            "https://192.168.1.2:8443",
-		"192.168.1.2:8443":       "https://192.168.1.2:8443",
-		"192.168.1.2:8080":       "https://192.168.1.2:8080",
-		"ctrl.lan/":              "https://ctrl.lan:8443",
-		"https://ctrl.lan:8443/": "https://ctrl.lan:8443",
-		"https://ctrl.lan":       "https://ctrl.lan",
-		"http://ctrl.lan":        "http://ctrl.lan",
-		"[fd00::5]":              "https://[fd00::5]:8443",
+func TestResolveBases(t *testing.T) {
+	cases := map[string][]string{
+		// A bare host is ambiguous: the console port answers first, the legacy
+		// standalone controller port is the fallback (#63).
+		"192.168.1.2":            {"https://192.168.1.2", "https://192.168.1.2:8443"},
+		"ctrl.lan/":              {"https://ctrl.lan", "https://ctrl.lan:8443"},
+		"[fd00::5]":              {"https://[fd00::5]", "https://[fd00::5]:8443"},
+		"192.168.1.2:8443":       {"https://192.168.1.2:8443"},
+		"192.168.1.2:8080":       {"https://192.168.1.2:8080"},
+		"https://ctrl.lan:8443/": {"https://ctrl.lan:8443"},
+		"https://ctrl.lan":       {"https://ctrl.lan"},
+		"http://ctrl.lan":        {"http://ctrl.lan"},
 	}
 	for in, want := range cases {
-		if got := resolveBase(in); got != want {
-			t.Fatalf("resolveBase(%q) = %q, want %q", in, got, want)
+		got := resolveBases(in)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("resolveBases(%q) = %v, want %v", in, got, want)
 		}
 	}
-	if got := resolveBase("   "); got != "" {
-		t.Fatalf("resolveBase(blank) = %q, want empty", got)
+	if got := resolveBases("   "); len(got) != 0 {
+		t.Fatalf("resolveBases(blank) = %v, want none", got)
+	}
+}
+
+// A console that accepts the login on /api/auth/login but only serves the site
+// API under /proxy/network must still be polled: the query retries the other
+// prefix instead of failing with 404 (#63).
+func TestPollRetriesSiteQueriesUnderTheProxyPrefix(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/proxy/network/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/api/auth/login", func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "unifises", Value: "session"})
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/proxy/network/api/s/default/stat/device", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Data []rawDevice `json:"data"`
+		}{fixtureDevices()[:1]})
+	})
+	mux.HandleFunc("/proxy/network/api/s/default/stat/sta", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(struct {
+			Data []rawClient `json:"data"`
+		}{nil})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	p := New(Config{Host: ts.URL})
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("site queries must retry the /proxy/network prefix: %v", err)
+	}
+	if data.System == nil || data.System.BridgeMAC != "74:AC:B9:00:00:01" {
+		t.Fatalf("gateway not read under the retried prefix: %+v", data.System)
+	}
+}
+
+// A base URL without the API is not the controller: the next candidate is
+// tried, and the one that answered is remembered for the following poll.
+func TestPollWalksToTheNextBase(t *testing.T) {
+	dead := httptest.NewServer(http.NotFoundHandler())
+	defer dead.Close()
+	live := httptest.NewServer(controllerMux("/proxy/network", fixtureDevices()[:1], nil))
+	defer live.Close()
+
+	p := New(Config{Host: "ctrl.lan"})
+	data, base, err := p.collectFrom(context.Background(), []string{dead.URL, live.URL})
+	if err != nil {
+		t.Fatalf("the walk must reach the base that answers: %v", err)
+	}
+	if base != live.URL {
+		t.Fatalf("base = %q, want %q", base, live.URL)
+	}
+	if data.System == nil {
+		t.Fatalf("payload not read from the answering base: %+v", data)
+	}
+	if got := p.candidateBases(); len(got) == 0 || got[0] != live.URL {
+		t.Fatalf("candidateBases = %v, want the answering base first", got)
+	}
+}
+
+// Rejected credentials are not retried on the other port: that only feeds the
+// controller's failed-login counter.
+func TestPollStopsOnRejectedCredentials(t *testing.T) {
+	var liveHits atomic.Int32
+	reject := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+	}))
+	defer reject.Close()
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		liveHits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer live.Close()
+
+	p := New(Config{Host: "ctrl.lan"})
+	_, _, err := p.collectFrom(context.Background(), []string{reject.URL, live.URL})
+	if err == nil {
+		t.Fatal("rejected credentials must fail the poll")
+	}
+	var authErr *AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("rejected credentials must stay terminal, got %T: %v", err, err)
+	}
+	if liveHits.Load() != 0 {
+		t.Fatalf("the next base must not be tried after rejected credentials, got %d request(s)", liveHits.Load())
 	}
 }
 

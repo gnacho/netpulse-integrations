@@ -13,6 +13,7 @@ RouterOS is a closed appliance OS, so the native NetPulse agent cannot run on it
 - DHCP leases.
 - ARP entries and stale state.
 - Bridge forwarding database.
+- Wireless stations: the registration table of both RouterOS 7 drivers (`/interface/wifi` and the legacy `/interface/wireless`), because with every port and radio in one bridge the FDB alone cannot tell a client joined to a radio from a wired one. Signal in dBm and band derived from the radio frequency. A device with no radios gets no wireless section at all.
 - Temperature.
 - Flash size.
 - Firmware update state.

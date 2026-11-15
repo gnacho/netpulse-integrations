@@ -738,6 +738,13 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		return nil, err
 	}
 	data.FDB.MACs = routerOSFDB(bridgeHostRows)
+	// #74: la tabla de registro WiFi es lo único que distingue una estación
+	// asociada a un radio de un cliente cableado detrás del mismo bridge.
+	wireless, err := pollWireless(conn)
+	if err != nil {
+		return nil, err
+	}
+	data.Wireless = wireless
 	healthRows, err := conn.queryRows("/system/health/print")
 	if err != nil {
 		return nil, err

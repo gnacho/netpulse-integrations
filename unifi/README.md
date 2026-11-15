@@ -28,7 +28,15 @@ Only two endpoints of one site, plus the login:
 | Device `uplink` | `fdb.macs` | Each switch and AP is attached to a port of its parent, so the topology hangs together without LLDP. |
 | Wireless client radio + signal | `wireless.clients` | Signal in dBm (falls back to `rssi` when absent), band mapped from the radio name (`na` to 5 GHz, `6e` to 6 GHz, otherwise 2.4 GHz). |
 | Client and device IP addresses | `arp` | MAC to latest known IP. |
+| Client `name`, then `hostname` | `dhcp.reservations` | The alias set in the controller wins over the hostname the client announced. Blank values and a name that is only the MAC are skipped, so an unnamed client still shows as its MAC. IDNA hostnames (`xn--...`) are decoded with `idna.Display.ToUnicode`; conversion errors preserve the input, and explicit aliases are untouched. |
+| Switch and AP `name` | `dhcp.reservations` | Names the device wherever it appears in the device list. An unnamed device stays unnamed. |
 | Gateway device | `system.board`, `system.sysinfo.uptime`, `system.bridgeMac` | Uptime and identity of the gateway; CPU and temperature are not read. |
+
+Names are sent as static reservations (a name pinned to a MAC, no address)
+because the server uses those for hosts without a lease. Reading them from a
+dhcp lease would claim this poller is the DHCP server, so no leases are sent.
+The server still prefers a hostname from a real lease elsewhere on the network,
+and a name set by hand in NetPulse overrides both.
 
 Everything else in the shared payload (DHCP leases, per-interface counters,
 VLANs, LLDP, roaming) has no verified match in this read-only surface and is
@@ -86,3 +94,5 @@ poller has no workaround for it.
   Plain HTTP works without either.
 - Read-only by design: no adoption, no configuration, no firmware actions, and
   no cloud access.
+
+Forwarded names also feed NetPulse’s existing device-type inference, so previously unnamed clients may receive a different inferred type. Manual type overrides retain their existing precedence.

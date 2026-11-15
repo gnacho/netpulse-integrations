@@ -1,6 +1,7 @@
 package unifi
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -38,10 +39,13 @@ type rawPort struct {
 
 // rawClient is one entry of stat/sta. Wired clients carry sw_mac plus
 // sw_port, wireless clients carry ap_mac plus the radio and signal fields.
+// Name is the alias the administrator gave the client in the controller and
+// Hostname is what the client announced itself.
 type rawClient struct {
 	MAC        string `json:"mac"`
 	IP         string `json:"ip"`
 	Name       string `json:"name"`
+	Hostname   string `json:"hostname"`
 	IsWired    bool   `json:"is_wired"`
 	SwitchMAC  string `json:"sw_mac"`
 	SwitchPort int    `json:"sw_port"`
@@ -80,6 +84,29 @@ func (p rawPort) isUp() bool {
 
 func (c rawClient) mac() string { return normalizeMAC(c.MAC) }
 
+// label is the name shown for the client: the controller alias first, then
+// the hostname the client announced. Empty when the controller knows neither.
+// The alias is what a person typed and is used as it is. A controller may
+// report an internationalised hostname in its IDNA form, an "xn--" A-label,
+// which is decoded for display; explicit aliases remain unchanged.
+func (c rawClient) label() string {
+	return pickName(c.mac(), c.Name, displayHostname(c.Hostname))
+}
+
+// pickName returns the first candidate that is not blank after trimming and
+// is not just the device's own MAC address, which carries no information the
+// server does not already have.
+func pickName(mac string, candidates ...string) string {
+	for _, n := range candidates {
+		n = strings.TrimSpace(n)
+		if n == "" || normalizeMAC(strings.ReplaceAll(n, "-", ":")) == mac {
+			continue
+		}
+		return n
+	}
+	return ""
+}
+
 // signalDbm prefers the dBm reading and falls back to rssi, which some
 // firmwares report in the same scale.
 func (c rawClient) signalDbm() int {
@@ -115,8 +142,8 @@ func portID(switchMAC string, portIdx int) string {
 }
 
 // buildPayload translates the controller inventory into the neutral payload:
-// FDB ports and MAC attachments, wireless clients, ARP identities and a
-// minimal system section taken from the gateway.
+// FDB ports and MAC attachments, wireless clients, ARP identities, client and
+// device names, and a minimal system section taken from the gateway.
 func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 	data := &probe.PayloadData{}
 
@@ -159,6 +186,23 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 	}
 	data.FDB = &probe.FDBData{MACs: macs, Ports: ports}
 
+	// names maps a MAC to the name the controller shows for it. The NetPulse
+	// server reads names for hosts it has no DHCP lease for from the static
+	// reservations of the dhcp section (name pinned to a MAC), which is the
+	// closest fit: this poller sees no DHCP server, so it emits no leases.
+	// The gateway is left out because it is named through system.board.
+	names := map[string]string{}
+	for _, d := range devs {
+		if k := d.kind(); k != "switch" && k != "ap" {
+			continue
+		}
+		if mac := d.mac(); mac != "" {
+			if n := pickName(mac, d.Name); n != "" {
+				names[mac] = n
+			}
+		}
+	}
+
 	wireless := map[string]probe.WirelessClient{}
 	arp := map[string]string{}
 	for _, c := range cls {
@@ -168,6 +212,9 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 		}
 		if ip := strings.TrimSpace(c.IP); ip != "" {
 			arp[mac] = ip
+		}
+		if n := c.label(); n != "" {
+			names[mac] = n
 		}
 		if c.IsWired {
 			if c.SwitchPort > 0 && strings.TrimSpace(c.SwitchMAC) != "" {
@@ -180,6 +227,14 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 	data.Wireless = &probe.WirelessData{Clients: wireless}
 	if len(arp) > 0 {
 		data.Arp = arp
+	}
+	if len(names) > 0 {
+		res := make([]probe.DhcpReservation, 0, len(names))
+		for mac, n := range names {
+			res = append(res, probe.DhcpReservation{MAC: mac, Name: n})
+		}
+		sort.Slice(res, func(i, j int) bool { return res[i].MAC < res[j].MAC })
+		data.DHCP = &probe.DHCPData{Reservations: res}
 	}
 
 	for _, d := range devs {

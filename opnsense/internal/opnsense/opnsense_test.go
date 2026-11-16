@@ -56,6 +56,10 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -118,6 +122,10 @@ func TestPollReturnsDocumentedSystemCountersAndARP(t *testing.T) {
 func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 	var rx, tx uint64 = 4500000000, 900000000
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -192,6 +200,10 @@ func TestPollComputesRatesForExplicitWANInterface(t *testing.T) {
 
 func TestPollSupportsCAAndCertificateFingerprintTrust(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -291,6 +303,10 @@ func TestPollClassifiesAuthenticationAndServerErrors(t *testing.T) {
 
 func TestPollReadsCountersFromARealSystem(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -390,6 +406,10 @@ func TestPollReadsCountersFromARealSystem(t *testing.T) {
 // costar los contadores ni el ARP.
 func TestPollKeepsGoingWithoutDashboardPrivilege(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -634,6 +654,10 @@ func TestCPUStreamClampsOutOfRangeValues(t *testing.T) {
 func TestClientTrafficIntegratesRatesIntoPerClientCounters(t *testing.T) {
 	arp := `{"rows":[{"mac":"AA:BB:CC:DD:EE:01","ip":"10.0.0.60","intf":"lan","expired":false}]}`
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -706,6 +730,10 @@ func TestClientTrafficDropsTheWindowAfterAFailedSample(t *testing.T) {
 	calls := 0
 	arp := `{"rows":[{"mac":"AA:BB:CC:DD:EE:01","ip":"10.0.0.60","intf":"lan","expired":false}]}`
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/") {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/diagnostics/system/system_information":
 			serveFixture(t, w, "system_information.json")
@@ -772,6 +800,97 @@ func TestClientTrafficDropsTheWindowAfterAFailedSample(t *testing.T) {
 	after := polls[4].ClientBw.Hosts[mac].RxBytes
 	if want := before + 254295; after != want {
 		t.Fatalf("rx = %d, want %d (one window of 30 s, not three)", after, want)
+	}
+}
+
+// #78: Network Insight da los totales exactos por host. `out` es tráfico hacia
+// el host (descarga) e `in` el que sale (subida), al revés que traffic/top. La
+// fila "everything else" y las IPs fuera del ARP no son clientes.
+func TestParseInsightTotals(t *testing.T) {
+	macByIP := map[string]string{"10.0.0.46": "AA:BB:CC:DD:EE:46"}
+	rows := []insightRow{
+		{SrcAddr: "10.0.0.46", Direction: "out", Total: 22848902872},
+		{SrcAddr: "10.0.0.46", Direction: "in", Total: 123456},
+		{SrcAddr: "10.0.0.47", Direction: "out", Total: 999},          // fuera del ARP
+		{SrcAddr: "", Direction: "", Total: 37614688883.99},           // "everything else"
+		{SrcAddr: "10.0.0.46", Direction: "out", Total: 1114141923.7}, // fraccionario, mismo host
+		{SrcAddr: "10.0.0.46", Direction: "sideways", Total: 42},      // dirección desconocida
+	}
+	got := parseInsightTotals(rows, macByIP)
+	if len(got) != 1 {
+		t.Fatalf("hosts = %+v, want only the ARP host", got)
+	}
+	c := got["AA:BB:CC:DD:EE:46"]
+	// out acumula: 22848902872 + round(1114141923.7) = 22848902872 + 1114141924.
+	if want := uint64(22848902872 + 1114141924); c.RxBytes != want || c.TxBytes != 123456 {
+		t.Fatalf("counter = %+v, want rx %d, tx 123456", c, want)
+	}
+}
+
+func TestInsightPathUsesTheFixedDayWindow(t *testing.T) {
+	p := New(Config{Host: "https://firewall.test"})
+	// 10 días exactos + 3600 s: from cae en la medianoche UTC del día.
+	got := p.insightPath(time.Unix(10*86400+3600, 0))
+	want := "/api/diagnostics/networkinsight/top/FlowSourceAddrTotals/864000/867600/src_addr,direction/octets/500"
+	if got != want {
+		t.Fatalf("insightPath = %q, want %q", got, want)
+	}
+}
+
+// #78: con Network Insight disponible, el clientBw sale de los totales exactos
+// de Insight (ya en el primer poll, sin abrir ventana) y traffic/top no se
+// llama.
+func TestInsightTrafficUsesExactTotals(t *testing.T) {
+	arp := `{"rows":[{"mac":"AA:BB:CC:DD:EE:01","ip":"10.0.0.60","intf":"lan","expired":false}]}`
+	var sawTop bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/diagnostics/networkinsight/top/FlowSourceAddrTotals/") {
+			_, _ = w.Write([]byte(`[{"src_addr":"10.0.0.60","direction":"out","total":1114141923},{"src_addr":"10.0.0.60","direction":"in","total":123456789},{"src_addr":"","direction":"","total":999.5}]`))
+			return
+		}
+		switch r.URL.Path {
+		case "/api/diagnostics/system/system_information":
+			serveFixture(t, w, "system_information.json")
+		case "/api/diagnostics/interface/get_interface_statistics":
+			serveFixture(t, w, "interface_statistics.json")
+		case "/api/diagnostics/interface/search_arp":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(arp))
+		case "/api/diagnostics/system/system_time":
+			serveFixture(t, w, "system_time.json")
+		case "/api/diagnostics/system/system_resources", "/api/diagnostics/system/system_temperature":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/diagnostics/cpu_usage/stream":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/diagnostics/traffic/top/lan":
+			sawTop = true
+			serveFixture(t, w, "traffic_top.json")
+		default:
+			t.Errorf("unexpected request path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	poller := New(Config{Host: server.URL, APIKey: "key", APISecret: "secret", Insecure: true})
+	poller.now = func() time.Time { return time.Unix(1794800000, 0) }
+
+	data, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if data.ClientBw == nil || !data.ClientBw.Available {
+		t.Fatalf("ClientBw = %+v, want the exact Insight totals on the first poll", data.ClientBw)
+	}
+	got := data.ClientBw.Hosts["AA:BB:CC:DD:EE:01"]
+	if got.RxBytes != 1114141923 || got.TxBytes != 123456789 {
+		t.Fatalf("counters = %+v, want out->rx 1114141923, in->tx 123456789", got)
+	}
+	if len(data.ClientBw.Hosts) != 1 {
+		t.Fatalf("hosts = %+v, want only the ARP host", data.ClientBw.Hosts)
+	}
+	if sawTop {
+		t.Fatal("traffic/top must not be called when Insight answers")
 	}
 }
 

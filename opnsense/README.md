@@ -11,7 +11,7 @@ Status: **beta, validated against OPNsense 26.7 in a VM and on a user unit, stil
 - IPv4 ARP entries, interface attribution and expired state from `search_arp`.
 - Memory from `system_resources` and the hottest sensor from `system_temperature`. Both are best effort: a user without the dashboard privilege keeps the counters and the ARP.
 - Uptime and load average from `system_time`, and CPU usage from the first event of `cpu_usage/stream`. The firewall serves the CPU as an SSE stream that never ends by itself, so the pusher reads one event and closes the connection. These are best effort too. The load average travels in the payload for parity with the native agent, which reports it from ubus, but the dashboard does not render it yet.
-- Per-client traffic for the Clients view from `traffic/top`, the same sample behind Reporting: Traffic. iftop measures each host for 2 seconds and the API reports a rate in bit/s, with no lifetime counters (`cumulative_bytes` covers that 2 s window only). The pusher integrates the rate into a running total per MAC, using the ARP table for the IP to MAC mapping, and the server differences those totals between pushes. The number that reaches the dashboard is therefore an average of samples, not bytes counted by the firewall. A host that is not in the ARP table is not reported. On the LAN interface `rate_bits_in` is traffic towards the host and `rate_bits_out` is traffic from it, which was checked against a known download (#65), so the download and upload split in the client series matches the direction of the transfer. Without the `Reporting: Traffic` privilege the endpoint answers 403 and the section is simply absent. Each poll spends the 2 second sample plus the reverse lookups on the firewall, so a short `NETPULSE_INTERVAL` multiplies that cost.
+- Per-client traffic for the Clients view. Network Insight (`FlowSourceAddrTotals`) is the preferred source and keeps exact per-host byte totals: the pusher reads the fixed "today" window and reports `out` (traffic towards the host, its download) and `in` (traffic from it) per MAC, using the ARP table for the IP to MAC mapping. Without the `Diagnostics: Network Insight` privilege the endpoint answers 403 and the pusher falls back to `traffic/top`, which integrates a 2 second iftop rate into a running total per MAC; that number is an average of samples, not bytes counted by the firewall, and it misses transfers shorter than the poll interval. In both cases a host that is not in the ARP table is not reported, and the download/upload split was checked against a known download (#65, #78).
 - Optional WAN RX/TX rates from counter deltas when an interface is explicitly selected.
 - Standard CA verification, a PEM CA file, a full-certificate SHA-256 pin or an explicit insecure opt-out.
 - Terminal classification for HTTP 401 and 403 responses. Other HTTP failures remain retryable.
@@ -38,7 +38,8 @@ no more:
 | `Diagnostics: ARP Table` | `diagnostics/interface/get_arp` |
 | `Diagnostics: Netstat` | `diagnostics/interface/get_interface_statistics` |
 | `Lobby: Dashboard` | `diagnostics/system/system_information` |
-| `Reporting: Traffic` | `diagnostics/traffic/top` (optional, per-client traffic) |
+| `Diagnostics: Network Insight` | `diagnostics/networkinsight/top` (optional, exact per-client totals) |
+| `Reporting: Traffic` | `diagnostics/traffic/top` (optional, per-client traffic fallback) |
 
 `System: Firmware` is not needed, even though `core/firmware/status` answers 403
 without it. Every request the pusher makes lives in the `diagnostics` module. The

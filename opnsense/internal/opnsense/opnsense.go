@@ -253,6 +253,18 @@ const (
 	// defaultTrafficInterfaces: la interfaz lógica que OPNsense asigna a la LAN
 	// por defecto. Un firewall con la LAN renombrada solo tiene que decirlo.
 	defaultTrafficInterfaces = "lan"
+	// networkInsightPath: raíz del endpoint "top" de Network Insight. El resto
+	// de la ruta lo arma insightPath (provider/from/to/fields/measure/max).
+	networkInsightPath = "/api/diagnostics/networkinsight/top/FlowSourceAddrTotals/"
+	// networkInsightMaxHits: top-N de hosts que se piden. Los hosts que quedan
+	// fuera caen en la fila "everything else" (src_addr vacío), que no es un
+	// cliente y se descarta.
+	networkInsightMaxHits = 500
+	// networkInsightWindow: la ventana fija "hoy" (medianoche UTC a ahora) en
+	// segundos. Fija, no rodante, para que el total por host sea monótono
+	// dentro del día y el reset de medianoche lo absorba el server como hace
+	// con el periodo de nlbwmon.
+	networkInsightWindow = 86400
 )
 
 // trafficInterface: respuesta de traffic/top por interfaz. `status` es "ok" o
@@ -270,6 +282,16 @@ type trafficRecord struct {
 	RateBits    int64  `json:"rate_bits"`
 	RateBitsIn  int64  `json:"rate_bits_in"`
 	RateBitsOut int64  `json:"rate_bits_out"`
+}
+
+// insightRow: una fila de FlowSourceAddrTotals. Cada host sale dos veces, una
+// por dirección, y el "everything else" (src_addr vacío) cierra la lista. El
+// total puede venir fraccionario (NetFlow reparte un flujo entre ventanas de
+// agregación), de ahí float64 y el redondeo al empaquetar (#78).
+type insightRow struct {
+	SrcAddr   string  `json:"src_addr"`
+	Direction string  `json:"direction"`
+	Total     float64 `json:"total"`
 }
 
 // uptimePattern: "HH:MM:SS" sin días y "N days, HH:MM:SS" con ellos. Es el
@@ -399,14 +421,14 @@ func trafficPath(raw string) (string, bool) {
 	return trafficTopPath + list, true
 }
 
-// clientTraffic arma la sección clientBw con el tráfico por cliente (#65). La
+// topTraffic arma la sección clientBw con el tráfico por cliente (#65). La
 // API no da contadores de por vida por host, solo la tasa que iftop mide en
 // una ventana de 2 s, así que cada muestra se integra en un total por MAC
 // (el ARP da la correspondencia IP -> MAC). El servidor diferencia esos
 // totales entre pushes, así que la cifra que llega a la lista de clientes es
 // una media de las muestras, no bytes contados por el firewall. Un host cuya
 // IP no esté en el ARP se descarta: sin MAC no hay cliente que pintar.
-func (p *Poller) clientTraffic(ctx context.Context, macByIP map[string]string) *probe.ClientBwData {
+func (p *Poller) topTraffic(ctx context.Context, macByIP map[string]string) *probe.ClientBwData {
 	if len(macByIP) == 0 {
 		return nil
 	}
@@ -473,6 +495,71 @@ func (p *Poller) clientTraffic(ctx context.Context, macByIP map[string]string) *
 		hosts[mac] = probe.NlbwCounter{RxBytes: uint64(c.rx), TxBytes: uint64(c.tx)}
 	}
 	return &probe.ClientBwData{Available: true, Hosts: hosts}
+}
+
+// clientTraffic resuelve la sección clientBw: Network Insight (totales exactos
+// por host, #78) cuando la fuente está disponible, y traffic/top (la tasa viva
+// integrada, #65) como respaldo para despliegues sin el privilegio de Insight.
+func (p *Poller) clientTraffic(ctx context.Context, macByIP map[string]string) *probe.ClientBwData {
+	if bw := p.insightTraffic(ctx, macByIP); bw != nil {
+		return bw
+	}
+	return p.topTraffic(ctx, macByIP)
+}
+
+// insightTraffic lee FlowSourceAddrTotals para la ventana "hoy" y convierte el
+// total exacto de cada host en su contador acumulado. `out` es tráfico hacia
+// el host (su descarga) e `in` el que sale (subida), al revés que traffic/top.
+// nil = fuente no disponible (sin privilegio o fallo): el caller cae al
+// respaldo. Una lectura exitosa con cero hosts devuelve Available=true con
+// Hosts vacío (honesto), no nil.
+func (p *Poller) insightTraffic(ctx context.Context, macByIP map[string]string) *probe.ClientBwData {
+	if len(macByIP) == 0 {
+		return nil
+	}
+	var rows []insightRow
+	if err := p.get(ctx, p.insightPath(p.now()), &rows); err != nil {
+		return nil
+	}
+	hosts := parseInsightTotals(rows, macByIP)
+	if len(hosts) == 0 {
+		return &probe.ClientBwData{Available: true, Hosts: map[string]probe.NlbwCounter{}}
+	}
+	return &probe.ClientBwData{Available: true, Hosts: hosts}
+}
+
+// insightPath arma la ruta del endpoint top: provider FlowSourceAddrTotals con
+// la ventana fija "hoy" (medianoche UTC a ahora), los campos src_addr+direction
+// y la medida octets.
+func (p *Poller) insightPath(now time.Time) string {
+	to := now.Unix()
+	from := to - (to % networkInsightWindow)
+	return fmt.Sprintf("%s%d/%d/src_addr,direction/octets/%d", networkInsightPath, from, to, networkInsightMaxHits)
+}
+
+// parseInsightTotals fusiona las dos filas por host (una por dirección) en un
+// contador por MAC. La fila "everything else" (src_addr vacío) y las IPs que
+// no están en el ARP se descartan: sin MAC no hay cliente que pintar.
+func parseInsightTotals(rows []insightRow, macByIP map[string]string) map[string]probe.NlbwCounter {
+	hosts := make(map[string]probe.NlbwCounter)
+	for _, row := range rows {
+		if row.SrcAddr == "" {
+			continue
+		}
+		mac := macByIP[row.SrcAddr]
+		if mac == "" {
+			continue
+		}
+		c := hosts[mac]
+		switch row.Direction {
+		case "out":
+			c.RxBytes += uint64(math.Round(row.Total))
+		case "in":
+			c.TxBytes += uint64(math.Round(row.Total))
+		}
+		hosts[mac] = c
+	}
+	return hosts
 }
 
 // parseUptime convierte el texto de system_time en segundos. Un formato

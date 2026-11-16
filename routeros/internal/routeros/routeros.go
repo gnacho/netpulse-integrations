@@ -502,6 +502,12 @@ func (c *routerOSAPIConn) query(cmd string, args ...string) ([]map[string]string
 		switch sentence[0] {
 		case "!done":
 			return rows, nil
+		case "!empty":
+			// RouterOS 7.18+ answers a print that returns no rows with an
+			// !empty sentence instead of !done. It is terminal: there is
+			// nothing after it, so the query must return here or the next
+			// read blocks until the deadline and fails the whole poll.
+			return rows, nil
 		case "!trap":
 			message := strings.Join(sentence[1:], " ")
 			return nil, trapErrorf(menuMissingReply(message), "routeros api %s: %s", cmd, message)

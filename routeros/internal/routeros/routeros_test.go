@@ -508,6 +508,33 @@ func TestPollAPIFailsWhenLateQueryTraps(t *testing.T) {
 	}
 }
 
+// A missing menu is reported with trap category 0, but the message is not one
+// of the known phrases on every build: the CLI spells the same refusal
+// "bad command name wireless" (issue #79, an ax device that only has the new
+// wifi driver answers the legacy menu that way). The classification must trust
+// the category, not only the message text.
+func TestPollAPIClassifiesMissingMenuByCategory(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/interface/wifi/registration-table/print"] = [][]byte{
+		testSentence("!trap", "=category=0", "=message=bad command name wifi"),
+	}
+	replies["/interface/wireless/registration-table/print"] = [][]byte{
+		testSentence("!trap", "=category=0", "=message=bad command name wireless"),
+	}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("a missing wireless menu must not fail the poll: %v", err)
+	}
+	if data.Wireless != nil {
+		t.Fatalf("wireless = %+v, want no wireless section for a box without radios", data.Wireless)
+	}
+	if data.FDB == nil || len(data.FDB.MACs) != 1 {
+		t.Fatalf("fdb = %+v, want the client sections to survive a missing wireless menu", data.FDB)
+	}
+}
+
 // A server that stops answering must fail the poll by the read deadline and
 // close the connection instead of hanging the poller.
 func TestPollAPIStalledReadFailsByDeadline(t *testing.T) {

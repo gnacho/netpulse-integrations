@@ -306,6 +306,29 @@ func menuMissingReply(message string) bool {
 	return false
 }
 
+// trapDetail splits a !trap sentence into its category and message. The
+// category is the RouterOS error category (0 = missing item or command) and
+// the message is the human text. Words the client does not recognise are
+// ignored, so an extra attribute in a future RouterOS release cannot break the
+// classification. A sentence without a category word returns -1.
+func trapDetail(words []string) (category int, message string) {
+	category = -1
+	for _, w := range words {
+		w = strings.TrimPrefix(w, "=")
+		k, v, ok := strings.Cut(w, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "category":
+			category, _ = strconv.Atoi(v)
+		case "message":
+			message = v
+		}
+	}
+	return category, message
+}
+
 // buildTLSConfig resolves how TLS connections to the router (api-ssl and
 // https REST) authenticate the server certificate. CertFP pins the exact
 // certificate, CACert trusts the CA that signed it and Insecure skips
@@ -509,8 +532,11 @@ func (c *routerOSAPIConn) query(cmd string, args ...string) ([]map[string]string
 			// read blocks until the deadline and fails the whole poll.
 			return rows, nil
 		case "!trap":
-			message := strings.Join(sentence[1:], " ")
-			return nil, trapErrorf(menuMissingReply(message), "routeros api %s: %s", cmd, message)
+			category, message := trapDetail(sentence[1:])
+			// category 0 is "missing item or command": the menu or item the
+			// poller asked for does not exist on this device. The message
+			// phrases stay as a fallback for traps that omit the category.
+			return nil, trapErrorf(category == 0 || menuMissingReply(message), "routeros api %s: %s", cmd, message)
 		case "!re":
 			row := map[string]string{}
 			for _, w := range sentence[1:] {

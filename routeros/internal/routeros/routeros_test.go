@@ -645,6 +645,36 @@ func containsAll(words []string, wanted ...string) bool {
 // keep the counters the print gave, the payload reports the neighbor table as
 // unavailable, and the poll still succeeds. Failing it would drop every other
 // section because of a feature the device does not have.
+// RouterOS 7.18+ answers a print that returns no rows with an !empty sentence
+// instead of !done. The wifi registration table is the section most likely to
+// be empty on a healthy unit (no station associated at this moment), so an
+// unhandled !empty there made the whole poll hang on the read deadline and fall
+// back to REST, which dropped every client section. The reply is terminal: the
+// query must return no rows and let the poll keep going.
+func TestPollAPIHandlesEmptyReply(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/interface/wifi/registration-table/print"] = [][]byte{testSentence("!empty")}
+	replies["/interface/wifi/print"] = [][]byte{testSentence("!empty")}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 300*time.Millisecond)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("pollAPI: %v", err)
+	}
+	if data.FDB == nil || len(data.FDB.MACs) != 1 {
+		t.Fatalf("fdb = %+v, want the client sections to survive an empty wireless table", data.FDB)
+	}
+	if data.DHCP == nil || len(data.DHCP.Leases) != 1 {
+		t.Fatalf("dhcp = %+v, want the client sections to survive an empty wireless table", data.DHCP)
+	}
+	// The unit has the wifi menu but no station right now: the payload carries
+	// an empty (not nil) wireless section, so the server clears any stale
+	// stations instead of keeping them.
+	if data.Wireless == nil || len(data.Wireless.Clients) != 0 {
+		t.Fatalf("wireless = %+v, want an empty section for a unit with radios but no stations", data.Wireless)
+	}
+}
+
 func TestPollAPIWithoutEthernetMenusStillPushes(t *testing.T) {
 	replies := fixtureAPIReplies()
 	replies["/interface/ethernet/print"] = [][]byte{

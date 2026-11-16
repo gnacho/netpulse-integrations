@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Handle the RouterOS 7.18+ `!empty` reply. A `print` that returns no rows answers with an `!empty` sentence instead of `!done`, and the client did not recognise it, so it kept reading until the read deadline and the whole poll failed, dropping every client section on the REST fallback. `!empty` is now treated as the no-data success it is, and the poll keeps pushing the full payload.
 - Read the wireless station registration table (`/interface/wifi/registration-table` and the legacy `/interface/wireless/registration-table`, merged when the unit has both drivers) so a client joined to a radio is reported as wireless with its signal in dBm, its band and the interface it is associated to. Without it, a RouterOS box that bridges every port and radio into one bridge reported those clients as wired behind the bridge port. A device without those menus pushes no wireless section, and a menu that fails for another reason keeps failing the poll instead of pushing a half read.
 - Stop writing `architecture-name` into `Board.Release.Target`. The server reads that field as the OpenWrt image target and only looks up a download profile when it is set, so `arm` turned into a target that cannot exist and the firmware panel tried to resolve it. The field is now empty, so the unit reports no detected target.
 - Stop writing `architecture-name` into `Board.System`. The server renders that field as the SoC on the router card, so a RB4011 showed `arm` as the chip next to the real `board-name`; the field is now empty and the card shows `—`.

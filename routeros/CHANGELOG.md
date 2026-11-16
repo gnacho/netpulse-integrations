@@ -5,6 +5,17 @@ follows Keep a Changelog and semantic versioning.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-16
+
+### Fixed
+
+- Classify a missing menu by the trap category, not only by the message text.
+  RouterOS reports "missing item or command" as category 0, and the message for
+  an absent submenu is not one of the known phrases on every build (an ax device
+  answers the legacy `/interface/wireless` menu with "bad command name
+  wireless"). Any category 0 trap is now treated as "this menu does not exist",
+  so the poll keeps pushing the full payload.
+
 ## [0.1.6] - 2026-11-16
 
 ### Fixed

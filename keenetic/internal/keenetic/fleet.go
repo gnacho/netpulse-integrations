@@ -134,9 +134,9 @@ func (f *Fleet) PollAll(ctx context.Context) []UnitResult {
 	for _, u := range f.units {
 		api := hostAPI
 		if u.MAC != "" {
-			// The member is queried directly at its management address; a
-			// fresh client per cycle keeps a member address change (DHCP
-			// lease renew) irrelevant.
+			// The member is queried directly at its management address; the
+			// poller caches one client per address, so a member address
+			// change (DHCP lease renew) simply opens a fresh cache entry.
 			if info, ok := members[u.MAC]; ok && info.IP != "" {
 				if direct, err := f.poller.client(info.IP); err == nil {
 					api = direct

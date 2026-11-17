@@ -147,6 +147,80 @@ func TestFleetRunStopsOnTerminalAuth(t *testing.T) {
 	}
 }
 
+func TestFleetSessionReusedAcrossCycles(t *testing.T) {
+	controller, member := fleetFixture(t)
+	fleet, err := NewFleet(Config{
+		Host:     controller.server.URL,
+		User:     "viewer",
+		Password: "x",
+		Timeout:  300 * time.Millisecond,
+	}, []Unit{
+		{Slug: "keenetic-main", Token: "tok-main"},
+		{Slug: "keenetic-ap1", Token: "tok-ap1", MAC: "02:AD:EF:C1:80:8A"},
+	})
+	if err != nil {
+		t.Fatalf("NewFleet: %v", err)
+	}
+	ctx := context.Background()
+	for cycle := 0; cycle < 2; cycle++ {
+		for _, res := range fleet.PollAll(ctx) {
+			if res.Err != nil {
+				t.Fatalf("cycle %d unit %s: %v", cycle, res.Unit.Slug, res.Err)
+			}
+		}
+	}
+	// Session reuse: the sliding window keeps the first-cycle session alive,
+	// so each router sees exactly ONE POST /auth across both cycles no
+	// matter how many requests the cycle makes.
+	if got := controller.authPOST; got != 1 {
+		t.Fatalf("controller POST /auth = %d across 2 cycles, want 1 (session must be reused)", got)
+	}
+	if got := member.authPOST; got != 1 {
+		t.Fatalf("member POST /auth = %d across 2 cycles, want 1 (session must be reused)", got)
+	}
+}
+
+func TestFleetReauthAfterSessionInvalidated(t *testing.T) {
+	controller, member := fleetFixture(t)
+	fleet, err := NewFleet(Config{
+		Host:     controller.server.URL,
+		User:     "viewer",
+		Password: "x",
+		Timeout:  300 * time.Millisecond,
+	}, []Unit{
+		{Slug: "keenetic-main", Token: "tok-main"},
+		{Slug: "keenetic-ap1", Token: "tok-ap1", MAC: "02:AD:EF:C1:80:8A"},
+	})
+	if err != nil {
+		t.Fatalf("NewFleet: %v", err)
+	}
+	ctx := context.Background()
+	for _, res := range fleet.PollAll(ctx) {
+		if res.Err != nil {
+			t.Fatalf("cycle 1 unit %s: %v", res.Unit.Slug, res.Err)
+		}
+	}
+	// The router closed the session between cycles (idle window closed,
+	// reboot): the next cycle must re-authenticate ONCE, transparently, and
+	// still deliver complete payloads.
+	controller.valid = ""
+	results := fleet.PollAll(ctx)
+	for _, res := range results {
+		if res.Err != nil {
+			t.Fatalf("cycle 2 unit %s: %v", res.Unit.Slug, res.Err)
+		}
+	}
+	if got := controller.authPOST; got != 2 {
+		t.Fatalf("controller POST /auth = %d after invalidation, want 2 (one re-auth)", got)
+	}
+	if got := member.authPOST; got != 1 {
+		t.Fatalf("member POST /auth = %d, want 1 (its session was not invalidated)", got)
+	}
+	if got := len(results[0].Data.Wireless.Clients); got != 4 {
+		t.Fatalf("controller clients after re-auth = %d, want 4", got)
+	}
+}
+
 func TestLoadFleetConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

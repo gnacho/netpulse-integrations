@@ -62,12 +62,13 @@ type rateSample struct {
 }
 
 // Poller polls units of one Keenetic installation. Safe for sequential use;
-// the mutex guards the rate samples map.
+// the mutex guards the rate samples map and the client session cache.
 type Poller struct {
 	cfg Config
 
 	mu      sync.Mutex
 	samples map[string]*rateSample
+	clients map[string]*keeneticapi.Client
 }
 
 // New validates the config.
@@ -82,17 +83,40 @@ func New(cfg Config) (*Poller, error) {
 		// the same form.
 		cfg.UnitMAC = normalized
 	}
-	return &Poller{cfg: cfg, samples: map[string]*rateSample{}}, nil
+	return &Poller{
+		cfg:     cfg,
+		samples: map[string]*rateSample{},
+		clients: map[string]*keeneticapi.Client{},
+	}, nil
 }
 
+// client returns the RCI client of one address, creating it on first use and
+// caching it for the poller's lifetime. The cache IS the session reuse: the
+// KeeneticOS cookie session lives in a 300-second sliding window that every
+// request extends, so a steady cycle authenticates once per router and then
+// walks with the issued session; when the router closes it anyway (idle gap
+// longer than the window, reboot), the next 401 triggers one transparent
+// re-authentication inside the client. Keyed by address string, so a member
+// whose management address changes simply gets a fresh entry; the stale one
+// stays harmlessly idle.
 func (p *Poller) client(host string) (*keeneticapi.Client, error) {
-	return keeneticapi.New(keeneticapi.Config{
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.clients[host]; ok {
+		return c, nil
+	}
+	c, err := keeneticapi.New(keeneticapi.Config{
 		Host:        host,
 		User:        p.cfg.User,
 		Password:    p.cfg.Password,
 		Timeout:     p.cfg.Timeout,
 		InsecureTLS: p.cfg.InsecureTLS,
 	})
+	if err != nil {
+		return nil, err
+	}
+	p.clients[host] = c
+	return c, nil
 }
 
 // memberError reports that the selected mesh member is not in the controller

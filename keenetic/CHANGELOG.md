@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.2 — 2026-11-18
+
+Session reuse: one authentication per router instead of one per cycle.
+
+- The poller keeps one RCI client per address for its lifetime; the
+  KeeneticOS cookie session (300-second sliding window, extended by every
+  request) is walked until the router closes it. A steady cycle therefore
+  authenticates ONCE per router, not once per cycle per unit (the fleet
+  used to perform 4 challenge handshakes every 60 s).
+- When the session does expire (idle gap > window, router reboot), the
+  next 401 re-authenticates transparently and the cycle completes —
+  unchanged behaviour, it just no longer happens by construction.
+- Removed the write-only session bookkeeping fields from the client.
+
 ## 0.1.1 — 2026-11-18
 
 Fleet mode: one process for the whole mesh.

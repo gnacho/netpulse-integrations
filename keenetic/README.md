@@ -56,6 +56,13 @@ Run it with `KEENETIC_CONFIG=/path/to/config.json`. Optional keys:
 `ca_file` / `server_fp` (HTTPS to NetPulse, never both), `timeout`
 (per-request, default 10s), `insecure_tls` (unit self-signed certificate).
 
+Sessions are reused: the poller keeps one authenticated client per router
+address for its lifetime, and the KeeneticOS session (a 300-second sliding
+window that every request extends) stays open across cycles. A steady cycle
+authenticates once per router and then walks with the issued session cookie;
+when the router closes the session anyway (idle gap, reboot), the next 401
+re-authenticates once, transparently.
+
 **Single-unit mode** (one slug per process) keeps the shared
 `NETPULSE_*`/`KEENETIC_*` environment contract and is what the integrations
 supervisor consumes — see the table below.

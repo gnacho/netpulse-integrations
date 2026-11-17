@@ -15,7 +15,7 @@ import (
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
-var Version = "0.1.1"
+var Version = "0.1.2"
 
 func run(ctx context.Context) error {
 	// Fleet shape: one process, many units, config file. This is the

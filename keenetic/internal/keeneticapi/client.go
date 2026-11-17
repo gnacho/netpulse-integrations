@@ -46,7 +46,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -122,17 +121,14 @@ type statusBody struct {
 	} `json:"status"`
 }
 
-// Client is a read-only RCI client for one unit. Safe for sequential use from
-// one poll loop; the mutex only guards the session bookkeeping.
+// Client is a read-only RCI client for one unit. It keeps the authenticated
+// cookie session open: the 401 answers re-authenticate transparently at most
+// once per request. Safe for sequential use from one poll loop.
 type Client struct {
 	base     *url.URL
 	user     string
 	password string
 	http     *http.Client
-
-	mu       sync.Mutex
-	authOK   bool
-	lastAuth time.Time
 }
 
 // New validates the config and returns a client. It does not talk to the
@@ -273,12 +269,11 @@ func walkStatus(raw []byte) error {
 	return nil
 }
 
-// authenticate runs the challenge-response handshake and marks the session
-// open. Credential rejection is terminal.
+// authenticate runs the challenge-response handshake and opens the session:
+// the router answers the POST with the session cookie the jar keeps. All
+// later requests walk with that cookie until the router closes the session;
+// credential rejection is terminal.
 func (c *Client) authenticate(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base.String()+"/auth", nil)
 	if err != nil {
 		return err
@@ -318,11 +313,8 @@ func (c *Client) authenticate(ctx context.Context) error {
 	defer res2.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(res2.Body, 4096))
 	if res2.StatusCode != http.StatusOK {
-		c.authOK = false
 		return &AuthError{Detail: fmt.Sprintf("HTTP %d", res2.StatusCode)}
 	}
-	c.authOK = true
-	c.lastAuth = time.Now()
 	return nil
 }
 

@@ -134,7 +134,7 @@ go vet ./...
 gofmt -l .
 ```
 
-Logs go to stderr through `slog`. Successful cycles log `integration pushed` with vendor and slug. A failed poll or push logs the error and retries on the next cycle.
+Logs go to stderr through `slog`. Successful cycles log `integration pushed` with vendor and slug. A failed poll or push logs the error and retries on the next cycle. When the binary API fails but REST succeeds, a warning records the API error, including the failed query when one caused it, before the reduced payload is pushed.
 
 ## Notes
 

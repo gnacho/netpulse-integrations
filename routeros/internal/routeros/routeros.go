@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,7 +75,8 @@ type Config struct {
 
 // Poller owns the previous WAN counters so rates survive between polls.
 type Poller struct {
-	cfg Config
+	cfg    Config
+	logger *slog.Logger
 	// tls is the resolved router trust configuration for api-ssl and https
 	// REST; nil means standard system verification. err holds a TLS trust
 	// configuration error and fails every poll until the config is fixed.
@@ -85,13 +87,18 @@ type Poller struct {
 	prev *rateSample
 }
 
-// New builds a poller. A zero timeout becomes ten seconds.
-func New(cfg Config) *Poller {
+// New builds a poller. A zero timeout becomes ten seconds. The optional
+// logger receives fallback diagnostics and defaults to slog.Default.
+func New(cfg Config, loggers ...*slog.Logger) *Poller {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
+	logger := slog.Default()
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	tlsCfg, err := buildTLSConfig(cfg)
-	return &Poller{cfg: cfg, tls: tlsCfg, err: err}
+	return &Poller{cfg: cfg, logger: logger, tls: tlsCfg, err: err}
 }
 
 // Poll tries the binary API first and REST second.
@@ -103,6 +110,7 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if apiErr == nil {
 		return apiData, nil
 	}
+	p.logger.Warn("routeros api poll failed; trying REST fallback", "error", apiErr)
 	restData, restErr := p.pollREST(ctx)
 	if restErr == nil {
 		return restData, nil

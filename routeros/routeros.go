@@ -2,9 +2,13 @@
 // supervisor while keeping its protocol implementation private.
 package routeros
 
-import internal "github.com/gnacho/netpulse-integrations/routeros/internal/routeros"
+import (
+	"log/slog"
+
+	internal "github.com/gnacho/netpulse-integrations/routeros/internal/routeros"
+)
 
 type Config = internal.Config
 type Poller = internal.Poller
 
-func New(cfg Config) *Poller { return internal.New(cfg) }
+func New(cfg Config, loggers ...*slog.Logger) *Poller { return internal.New(cfg, loggers...) }

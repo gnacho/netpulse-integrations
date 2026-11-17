@@ -1,0 +1,21 @@
+[
+  {
+    "ip": "198.18.0.57",
+    "mac": "0e:00:00:61:9a:50",
+    "interface": "Bridge0",
+    "state": "REACHABLE"
+  },
+  {
+    "ip": "198.18.0.1",
+    "mac": "00:0e:00:00:3e:10",
+    "interface": "Bridge0",
+    "name": "gateway",
+    "state": "REACHABLE"
+  },
+  {
+    "ip": "198.18.0.133",
+    "mac": "0e:00:00:43:c7:04",
+    "interface": "Bridge0",
+    "state": "REACHABLE"
+  }
+]

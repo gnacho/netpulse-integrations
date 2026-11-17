@@ -1,0 +1,17 @@
+{
+  "release": "5.01.C.8.0-2",
+  "sandbox": "stable",
+  "title": "5.1.8",
+  "arch": "aarch64",
+  "ndm": { "exact": "0-build1234", "cdate": "8 Oct 2026" },
+  "manufacturer": "Keenetic Ltd.",
+  "vendor": "Keenetic",
+  "series": "KN",
+  "model": "Ultra (KN-0000)",
+  "hw_version": "11188000",
+  "hw_type": "router",
+  "hw_id": "KN-0000",
+  "device": "Ultra",
+  "region": "EA",
+  "description": "Keenetic Ultra (KN-0000)"
+}

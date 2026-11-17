@@ -1,0 +1,16 @@
+{
+  "hostname": "Keenetic-bbbb",
+  "domainname": "WORKGROUP",
+  "cpuload": 4,
+  "memory": "169912/262144",
+  "swap": "0/0",
+  "memtotal": 262144,
+  "memfree": 45964,
+  "membuffers": 9540,
+  "memcache": 36728,
+  "swaptotal": 0,
+  "swapfree": 0,
+  "uptime": "1070943",
+  "conntotal": 16384,
+  "connfree": 16319
+}

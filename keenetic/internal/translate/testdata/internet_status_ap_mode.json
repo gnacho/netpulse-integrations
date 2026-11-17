@@ -1,0 +1,23 @@
+{
+  "checked": "Tue Nov 17 23:52:42 2026",
+  "enabled": true,
+  "reliable": true,
+  "gateway-accessible": true,
+  "dns-accessible": true,
+  "captive-accessible": true,
+  "internet": true,
+  "gateway": {
+    "interface": "Bridge0",
+    "address": "198.18.0.1",
+    "failures": 0,
+    "accessible": true,
+    "excluded": false
+  },
+  "captive": {
+    "host": "captive.example.net",
+    "response": "200 (OK)",
+    "failures": 0,
+    "resolved": true,
+    "address": "198.19.0.13"
+  }
+}

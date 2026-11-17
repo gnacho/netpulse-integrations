@@ -1,0 +1,99 @@
+{
+  "GigabitEthernet0": {
+    "id": "GigabitEthernet0",
+    "type": "GigabitEthernet",
+    "mac": "02:AD:EF:ae:80:f0",
+    "state": "up",
+    "link": "up",
+    "connected": "yes"
+  },
+  "GigabitEthernet0/Vlan1": {
+    "id": "GigabitEthernet0/Vlan1",
+    "type": "Vlan",
+    "state": "up",
+    "link": "up",
+    "connected": "yes"
+  },
+  "WifiMaster0": {
+    "id": "WifiMaster0",
+    "type": "WifiMaster",
+    "mac": "02:AD:EF:ae:80:f2",
+    "state": "up"
+  },
+  "WifiMaster0/AccessPoint0": {
+    "id": "WifiMaster0/AccessPoint0",
+    "index": 0,
+    "type": "AccessPoint",
+    "description": "Wi-Fi access point",
+    "link": "up",
+    "connected": "yes",
+    "state": "up",
+    "mtu": 1500,
+    "group": "Bridge0",
+    "usedby": ["Bridge0"],
+    "mac": "02:AD:EF:ae:80:f2",
+    "auth-type": "none",
+    "ssid": "home-net",
+    "encryption": "wpa2,wpa3"
+  },
+  "WifiMaster0/AccessPoint1": {
+    "id": "WifiMaster0/AccessPoint1",
+    "index": 1,
+    "type": "AccessPoint",
+    "link": "down",
+    "connected": "no",
+    "state": "down",
+    "mtu": 1500,
+    "mac": "03:AD:EF:9e:80:f2",
+    "auth-type": "none",
+    "encryption": ""
+  },
+  "WifiMaster1": {
+    "id": "WifiMaster1",
+    "type": "WifiMaster",
+    "mac": "02:AD:EF:ae:80:f4",
+    "state": "up"
+  },
+  "WifiMaster1/AccessPoint0": {
+    "id": "WifiMaster1/AccessPoint0",
+    "index": 0,
+    "type": "AccessPoint",
+    "description": "5GHz Wi-Fi access point",
+    "link": "up",
+    "connected": "yes",
+    "state": "up",
+    "mtu": 1500,
+    "group": "Bridge0",
+    "usedby": ["Bridge0"],
+    "mac": "02:AD:EF:ae:80:f4",
+    "auth-type": "none",
+    "ssid": "home-net",
+    "encryption": "wpa2,wpa3"
+  },
+  "WifiMaster1/AccessPoint1": {
+    "id": "WifiMaster1/AccessPoint1",
+    "index": 1,
+    "type": "AccessPoint",
+    "link": "down",
+    "connected": "no",
+    "state": "down",
+    "mtu": 1500,
+    "mac": "03:AD:EF:9e:80:f4",
+    "auth-type": "none",
+    "encryption": ""
+  },
+  "WifiMaster0/WifiStation0": {
+    "id": "WifiMaster0/WifiStation0",
+    "type": "WifiStation",
+    "state": "down",
+    "mac": "03:AD:EF:ae:80:f6"
+  },
+  "Bridge0": {
+    "id": "Bridge0",
+    "type": "Bridge",
+    "mac": "02:AD:EF:ae:80:f2",
+    "state": "up",
+    "link": "up",
+    "connected": "yes"
+  }
+}

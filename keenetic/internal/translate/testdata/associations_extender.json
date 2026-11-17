@@ -1,0 +1,25 @@
+{
+  "station": [
+    {
+      "mac": "0e:00:00:00:dc:e8",
+      "ap": "WifiMaster0/AccessPoint0",
+      "psm": true,
+      "authenticated": true,
+      "txrate": 65,
+      "rxrate": 65,
+      "uptime": 22719,
+      "txbytes": 27162,
+      "rxbytes": 167124,
+      "ht": 20,
+      "mode": "11n",
+      "gi": 800,
+      "rssi": -37,
+      "mcs": 7,
+      "txss": 1,
+      "ebf": false,
+      "dl-mu": false,
+      "pmf": true,
+      "security": "wpa3-psk"
+    }
+  ]
+}

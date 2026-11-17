@@ -78,11 +78,11 @@ func (f *flexInt) UnmarshalJSON(raw []byte) error {
 func (f flexInt) Float64() float64 { return float64(f) }
 
 type systemDoc struct {
-	Hostname string  `json:"hostname"`
-	CPULoad  *int    `json:"cpuload"`
-	MemTotal *uint64 `json:"memtotal"` // KiB on KeeneticOS 5.x (fixture: 524288 on a 512 MiB unit)
-	MemFree  *uint64 `json:"memfree"`  // KiB
-	Uptime   *flexInt `json:"uptime"`  // seconds; string on 5.x, number elsewhere
+	Hostname string   `json:"hostname"`
+	CPULoad  *int     `json:"cpuload"`
+	MemTotal *uint64  `json:"memtotal"` // KiB on KeeneticOS 5.x (fixture: 524288 on a 512 MiB unit)
+	MemFree  *uint64  `json:"memfree"`  // KiB
+	Uptime   *flexInt `json:"uptime"`   // seconds; string on 5.x, number elsewhere
 }
 
 // memberDoc is one entry of show/mws/member. The mesh report is the richest
@@ -123,14 +123,14 @@ type assocDoc struct {
 
 type hotspotDoc struct {
 	Host []struct {
-		MAC        string  `json:"mac"`
-		Name       string  `json:"name"`     // user-assigned name (known hosts)
-		Hostname   string  `json:"hostname"` // client-reported
-		IP         string  `json:"ip"`
-		Active     *bool   `json:"active"`
-		Registered *bool   `json:"registered"`
-		RxBytes    uint64  `json:"rxbytes"` // fixture: confirm counter semantics before mapping to clientBw
-		TxBytes    uint64  `json:"txbytes"`
+		MAC        string `json:"mac"`
+		Name       string `json:"name"`     // user-assigned name (known hosts)
+		Hostname   string `json:"hostname"` // client-reported
+		IP         string `json:"ip"`
+		Active     *bool  `json:"active"`
+		Registered *bool  `json:"registered"`
+		RxBytes    uint64 `json:"rxbytes"` // fixture: confirm counter semantics before mapping to clientBw
+		TxBytes    uint64 `json:"txbytes"`
 	} `json:"host"`
 }
 
@@ -161,13 +161,13 @@ type internetDoc struct {
 // radio summary derives from associations; system rates are absent).
 // "connected" arrives as "yes"/"no" strings on some entries, hence RawMessage.
 type ifaceDoc struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"` // "Bridge" | "AccessPoint" | "WifiMaster" | "GigabitEthernet" | ...
-	MAC      string `json:"mac"`
-	State    string `json:"state"` // "up" | "down"
-	SSID     string `json:"ssid"`
-	RxBytes  *uint64 `json:"rxbytes"` // absent on 5.1: no interface traffic counters
-	TxBytes  *uint64 `json:"txbytes"`
+	ID      string  `json:"id"`
+	Type    string  `json:"type"` // "Bridge" | "AccessPoint" | "WifiMaster" | "GigabitEthernet" | ...
+	MAC     string  `json:"mac"`
+	State   string  `json:"state"` // "up" | "down"
+	SSID    string  `json:"ssid"`
+	RxBytes *uint64 `json:"rxbytes"` // absent on 5.1: no interface traffic counters
+	TxBytes *uint64 `json:"txbytes"`
 }
 type ifacesDoc map[string]ifaceDoc
 

@@ -25,6 +25,8 @@ type fakeRouter struct {
 	http200Error bool
 	// authFailures counts rejected POST /auth attempts.
 	authFailures int
+	// rejectAuth forces every POST /auth to answer 401 (terminal-error test).
+	rejectAuth bool
 	// rcCalls counts authenticated /rci requests (auth calls excluded).
 	rcCalls int
 	// authCalls counts GET /auth handshakes.
@@ -62,6 +64,11 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, "bad json", http.StatusBadRequest)
+				return
+			}
+			if f.rejectAuth {
+				f.authFailures++
+				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
 			if body.Password != authKey(body.Login, f.password, f.realm, f.challenge) {

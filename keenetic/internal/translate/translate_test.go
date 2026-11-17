@@ -243,8 +243,8 @@ func TestUsefulNameStripsAutoSuffix(t *testing.T) {
 	cases := map[string]string{
 		"Glavnaa-spalna - Основная - 2026-10-11 15:59": "Glavnaa-spalna",
 		"Keenetic-7281 - Основная - 2026-10-11 15:19":  "Keenetic-7281",
-		"plain-name":                                   "plain-name",
-		"":                                             "",
+		"plain-name": "plain-name",
+		"":           "",
 	}
 	for in, want := range cases {
 		if got := usefulName("02:AD:EF:00:00:01", in); got != want {

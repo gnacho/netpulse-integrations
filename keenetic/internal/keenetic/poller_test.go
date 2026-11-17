@@ -22,9 +22,20 @@ type fakeRCI struct {
 	// and mws/member answer 404, and the served associations are the
 	// extender's own.
 	extender bool
+	// authGETs counts GET /auth handshakes (cookie issuance).
 	authGETs int
+	// authPOST counts POST /auth attempts.
 	authPOST int
+	// rejectAuth forces every POST /auth to answer 401 (terminal-error test).
+	rejectAuth bool
+	// valid is the cookie name whose POST /auth SUCCEEDED: the real router
+	// activates the session only then — the cookie issued at GET /auth does
+	// not authenticate /rci by itself.
+	valid string
+	// calls counts GET /rci/<path> hits per path (mesh-report sharing tests).
+	calls map[string]int
 }
+
 func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 	t.Helper()
 	read := func(name string) string {
@@ -34,16 +45,16 @@ func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 		}
 		return string(raw)
 	}
-	f := &fakeRCI{extender: extender}
+	f := &fakeRCI{extender: extender, calls: map[string]int{}}
 	f.paths = map[string]string{
-		"show/version":       read("version_5_1.json"),
-		"show/system":        read("system_controller.json"),
-		"show/associations":  read("associations_controller.json"),
-		"show/ip/hotspot":    read("hotspot_controller.json"),
-		"show/ip/arp":        read("arp.json"),
-		"show/interface":     read("interface_5_1.json"),
-		"show/mws/member":    read("mws_member_mesh.json"),
-		"show/mws":           `{"auto-update":false,"controller":{"update-pending":false}}`,
+		"show/version":          read("version_5_1.json"),
+		"show/system":           read("system_controller.json"),
+		"show/associations":     read("associations_controller.json"),
+		"show/ip/hotspot":       read("hotspot_controller.json"),
+		"show/ip/arp":           read("arp.json"),
+		"show/interface":        read("interface_5_1.json"),
+		"show/mws/member":       read("mws_member_mesh.json"),
+		"show/mws":              `{"auto-update":false,"controller":{"update-pending":false}}`,
 		"show/ip/dhcp/bindings": "[]",
 	}
 	if extender {
@@ -68,6 +79,15 @@ func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 			w.WriteHeader(http.StatusUnauthorized)
 		case http.MethodPost:
 			f.authPOST++
+			if f.rejectAuth {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			for _, c := range r.Cookies() {
+				if strings.HasPrefix(c.Name, "sess") && c.Value == "sid" {
+					f.valid = c.Name
+				}
+			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{}`))
 		}
@@ -75,7 +95,7 @@ func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 	mux.HandleFunc("/rci/", func(w http.ResponseWriter, r *http.Request) {
 		okCookie := false
 		for _, c := range r.Cookies() {
-			if c.Name != "" && strings.HasPrefix(c.Name, "sess") && c.Value == "sid" {
+			if c.Value == "sid" && c.Name == f.valid {
 				okCookie = true
 			}
 		}
@@ -84,6 +104,7 @@ func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 			return
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/rci/")
+		f.calls[path]++
 		body, ok := f.paths[path]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)

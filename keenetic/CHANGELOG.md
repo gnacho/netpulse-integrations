@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.1 — 2026-11-18
+
+Fleet mode: one process for the whole mesh.
+
+- `KEENETIC_CONFIG=<config.json>`: one cycle reads the mesh report from the
+  controller ONCE and polls every configured unit (controller directly,
+  members at the management address the report carries), pushing one signed
+  payload per unit under its own slug and token.
+- Fleet config JSON validation: server/host/credentials, unique slugs,
+  normalised member MACs, Go-duration interval (default 60s) and timeout.
+- Terminal credential rejection stops the whole fleet (no brute-force
+  hammering); per-unit failures stay independent.
+- Single-unit env mode unchanged (the shared supervisor contract).
+
 ## 0.1.0 — 2026-11-18
 
 First read-only slice.

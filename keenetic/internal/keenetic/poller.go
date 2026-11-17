@@ -1,9 +1,18 @@
 // Package keenetic is the NetPulse poller for KeeneticOS units. It drives the
-// read-only RCI client, picks the sections one unit exposes, and hands the
-// raw answers to the translate package. One Poller reports ONE unit: the
-// process the poller runs in is registered in NetPulse under one slug, so a
-// mesh of four units is four pollers (in the shared integrations supervisor
-// or four standalone processes) pointed at the same controller.
+// read-only RCI client, picks the sections each unit exposes, and hands the
+// raw answers to the translate package.
+//
+// Two shapes of the same poller:
+//
+//   - Poller: one unit per process (slug + token from the environment), for
+//     the shared integrations supervisor and single-unit deployments.
+//   - Fleet: many units in one process (units from a JSON config file). One
+//     cycle reads the mesh report from the controller ONCE and then polls
+//     each unit, pushing one signed payload per unit.
+//
+// In both shapes the association logic is identical: the member of the mesh
+// is queried directly at the management address the controller reports, so
+// its association list is its own clients.
 package keenetic
 
 import (
@@ -21,16 +30,16 @@ import (
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
-// Config is the poller configuration: where the unit lives, the credentials,
-// and which member of the mesh this poller reports.
+// Config is the poller configuration: where the units live, the credentials,
+// and (single-unit shape) which member of the mesh this poller reports.
 type Config struct {
-	// Host of the unit to query, or of the mesh controller when UnitMAC
+	// Host of the unit to query, or of the mesh controller when a unit MAC
 	// selects a member. A bare host talks plain HTTP.
 	Host string
 	User string
 	// Password of a dedicated read-only account. Never the browsing admin
-	// account. Lives in the supervisor entry or the environment file, never
-	// in a repository.
+	// account. Lives in the supervisor entry or the config file, never in a
+	// repository.
 	Password string
 	// UnitMAC (base MAC, any case) selects the mesh member this poller
 	// reports. Empty means "the unit the host points at". The member is
@@ -44,17 +53,21 @@ type Config struct {
 	InsecureTLS bool
 }
 
-// Poller polls one unit at the declared interval.
+// rateSample is the previous traffic sample of ONE unit (cumulative interface
+// counters), used for system rates.
+type rateSample struct {
+	rx, tx uint64
+	at     time.Time
+	ok     bool
+}
+
+// Poller polls units of one Keenetic installation. Safe for sequential use;
+// the mutex guards the rate samples map.
 type Poller struct {
 	cfg Config
 
-	// traffic sample state for system rates (cumulative interface counters),
-	// guarded, touched only from Poll.
-	mu     sync.Mutex
-	prevRx uint64
-	prevTx uint64
-	prevAt time.Time
-	prevOK bool
+	mu      sync.Mutex
+	samples map[string]*rateSample
 }
 
 // New validates the config.
@@ -69,7 +82,17 @@ func New(cfg Config) (*Poller, error) {
 		// the same form.
 		cfg.UnitMAC = normalized
 	}
-	return &Poller{cfg: cfg}, nil
+	return &Poller{cfg: cfg, samples: map[string]*rateSample{}}, nil
+}
+
+func (p *Poller) client(host string) (*keeneticapi.Client, error) {
+	return keeneticapi.New(keeneticapi.Config{
+		Host:        host,
+		User:        p.cfg.User,
+		Password:    p.cfg.Password,
+		Timeout:     p.cfg.Timeout,
+		InsecureTLS: p.cfg.InsecureTLS,
+	})
 }
 
 // memberError reports that the selected mesh member is not in the controller
@@ -81,57 +104,58 @@ func (e *memberError) Error() string {
 	return "mesh member " + e.mac + " is not in the controller member list"
 }
 
-// Poll collects one coherent snapshot of the unit. Section queries fail
-// independently: a failed or unsupported section is nil in the payload
-// (NetPulse keeps the last good value) and logged. A poll fails whole only
-// when the unit identity itself (show/version, show/system on the query
-// target) is unreachable.
+// fetchMembers reads show/mws/member from the given client. A 404 (no mesh
+// component, or an extender) yields an empty map; other failures are logged
+// and also yield an empty map — EXCEPT a credential rejection, which
+// propagates: the fleet must stop instead of hammering the router.
+func (p *Poller) fetchMembers(ctx context.Context, api *keeneticapi.Client) (map[string]translate.MemberInfo, error) {
+	raw, _, err := api.TryGet(ctx, "show/mws/member")
+	if err == nil {
+		return translate.MembersMap(raw), nil
+	}
+	if isNotFound(err) {
+		return map[string]translate.MemberInfo{}, nil
+	}
+	var auth *keeneticapi.AuthError
+	if errors.As(err, &auth) {
+		return nil, err
+	}
+	slog.Debug("keenetic: mesh member list unavailable", "err", err)
+	return map[string]translate.MemberInfo{}, nil
+}
+
+// Poll collects one coherent snapshot of ONE unit (single-unit shape).
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
-	// api queries the section sources: the member directly when one is
-	// selected, the configured host otherwise.
-	api, err := keeneticapi.New(keeneticapi.Config{
-		Host:        p.cfg.Host,
-		User:        p.cfg.User,
-		Password:    p.cfg.Password,
-		Timeout:     p.cfg.Timeout,
-		InsecureTLS: p.cfg.InsecureTLS,
-	})
+	api, err := p.client(p.cfg.Host)
 	if err != nil {
 		return nil, err
 	}
-
-	// The mesh report always comes from the configured host: it is the only
-	// source of the member table, per-member firmware-available, backhaul
-	// medium and the member management address.
-	var members map[string]translate.MemberInfo
-	var member json.RawMessage
-	if raw, _, err := api.TryGet(ctx, "show/mws/member"); err == nil {
-		members = translate.MembersMap(raw)
-	} else if !isNotFound(err) {
-		slog.Debug("keenetic: mesh member list unavailable", "err", err)
+	members, err := p.fetchMembers(ctx, api)
+	if err != nil {
+		return nil, err
 	}
-	var memberIP string
-	if p.cfg.UnitMAC != "" {
-		info, ok := members[p.cfg.UnitMAC]
+	return p.pollUnit(ctx, api, p.cfg.UnitMAC, members)
+}
+
+// pollUnit builds the payload of one unit. api is the client the section
+// queries go to (the member directly when one is selected, the configured
+// host otherwise); members is the mesh report ALREADY fetched from the
+// controller — the fleet shape fetches it once per cycle for all units.
+func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo) (*probe.PayloadData, error) {
+	var member json.RawMessage
+	if unitMAC != "" {
+		info, ok := members[unitMAC]
 		if !ok {
-			return nil, &memberError{mac: p.cfg.UnitMAC}
+			return nil, &memberError{mac: unitMAC}
 		}
 		member = info.Raw
-		memberIP = info.IP
 		// PROVISIONAL (integration issue #1, plan §4 Q1/Q6): a member is
 		// queried directly at its management address so the association list
-		// is the member's own. Whether every extender answers RCI in extender
-		// mode is confirmed by the first live fixtures; when it does not, the
-		// sections below just fail and the payload degrades to the
-		// controller-known facts.
-		if memberIP != "" {
-			if direct, err := keeneticapi.New(keeneticapi.Config{
-				Host:        memberIP,
-				User:        p.cfg.User,
-				Password:    p.cfg.Password,
-				Timeout:     p.cfg.Timeout,
-				InsecureTLS: p.cfg.InsecureTLS,
-			}); err == nil {
+		// is the member's own. Live-confirmed on KeeneticOS 5.1.8: an
+		// extender answers version/system/associations/arp/interface and
+		// 404s hotspot and mws/member (controller-only sections).
+		if info.IP != "" {
+			if direct, err := p.client(info.IP); err == nil {
 				api = direct
 			}
 		}
@@ -154,7 +178,7 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	ifaces := p.section(ctx, api, "show/interface")
 
 	var internet json.RawMessage
-	if p.cfg.UnitMAC == "" {
+	if unitMAC == "" {
 		// Only the unit the host points at reports a WAN: a mesh member has
 		// no uplink of its own, and its internet check travels the mesh.
 		internet = p.section(ctx, api, "show/internet/status")
@@ -187,8 +211,8 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	data.System.IfaceMACs = translate.IfaceMACs(ifaces, member)
 
 	// Rates: cumulative counters of the traffic interface (WAN on a gateway,
-	// bridge on an AP) sampled between cycles.
-	data.System.RxBps, data.System.TxBps = p.rates(ifaces, sec.Internet)
+	// bridge on an AP) sampled between cycles, per unit.
+	data.System.RxBps, data.System.TxBps = p.rates(unitMAC, ifaces, sec.Internet)
 
 	// Radio summary: association-derived client counts upgraded with channel,
 	// width, power and BSSID from the interface list.
@@ -206,8 +230,8 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 		for mac := range members {
 			exclude[mac] = true
 		}
-		if p.cfg.UnitMAC != "" {
-			exclude[p.cfg.UnitMAC] = true
+		if unitMAC != "" {
+			exclude[unitMAC] = true
 		}
 		for mac := range data.Wireless.Clients {
 			if exclude[mac] {
@@ -231,8 +255,9 @@ func (p *Poller) section(ctx context.Context, api *keeneticapi.Client, path stri
 
 // rates computes system rxBps/txBps from the delta of the traffic interface
 // counters. The first cycle after start (or after a counter reset) yields nil
-// rates, which the server handles as "no rate yet".
-func (p *Poller) rates(ifaces, internet json.RawMessage) (rxBps, txBps *float64) {
+// rates, which the server handles as "no rate yet". Samples are per unit key
+// (the unit MAC, "" for the host unit).
+func (p *Poller) rates(unitKey string, ifaces, internet json.RawMessage) (rxBps, txBps *float64) {
 	id := translate.PickTrafficIface(translate.WanInterfaceID(internet), ifaces)
 	if id == "" {
 		return nil, nil
@@ -244,18 +269,17 @@ func (p *Poller) rates(ifaces, internet json.RawMessage) (rxBps, txBps *float64)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
-	defer func() {
-		p.prevRx, p.prevTx, p.prevAt, p.prevOK = rx, tx, now, true
-	}()
-	if !p.prevOK {
+	prev, had := p.samples[unitKey]
+	p.samples[unitKey] = &rateSample{rx: rx, tx: tx, at: now, ok: true}
+	if !had || !prev.ok {
 		return nil, nil
 	}
-	dt := now.Sub(p.prevAt).Seconds()
-	if dt <= 0 || rx < p.prevRx || tx < p.prevTx {
+	dt := now.Sub(prev.at).Seconds()
+	if dt <= 0 || rx < prev.rx || tx < prev.tx {
 		return nil, nil
 	}
-	rxVal := round0(float64(rx-p.prevRx) * 8 / dt)
-	txVal := round0(float64(tx-p.prevTx) * 8 / dt)
+	rxVal := round0(float64(rx-prev.rx) * 8 / dt)
+	txVal := round0(float64(tx-prev.tx) * 8 / dt)
 	return &rxVal, &txVal
 }
 

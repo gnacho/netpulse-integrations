@@ -30,7 +30,37 @@ report from the controller address, then queries the selected member
 directly at the management address the report carries, because on KeeneticOS
 each unit's `show/associations` lists only its own clients.
 
-## Configuration
+## Two shapes: fleet (one process, many units) and single
+
+**Fleet mode** is the recommended deployment for a mesh: one process reads
+the mesh report from the controller once per cycle and then polls every
+configured unit, pushing one signed payload per unit. Configuration lives in
+a JSON file (chmod 600 — it carries the tokens and the account password):
+
+```json
+{
+  "server":   "http://192.168.1.2:3000",
+  "interval": "60s",
+  "host":     "192.168.1.1",
+  "user":     "netpulse-reader",
+  "password": "REPLACE_WITH_ACCOUNT_PASSWORD",
+  "units": [
+    { "slug": "keenetic-main", "token": "REPLACE_WITH_AGENT_TOKEN" },
+    { "slug": "keenetic-ap1",  "token": "REPLACE_WITH_AGENT_TOKEN", "mac": "aa:bb:cc:dd:ee:01" },
+    { "slug": "keenetic-ap2",  "token": "REPLACE_WITH_AGENT_TOKEN", "mac": "aa:bb:cc:dd:ee:02" }
+  ]
+}
+```
+
+Run it with `KEENETIC_CONFIG=/path/to/config.json`. Optional keys:
+`ca_file` / `server_fp` (HTTPS to NetPulse, never both), `timeout`
+(per-request, default 10s), `insecure_tls` (unit self-signed certificate).
+
+**Single-unit mode** (one slug per process) keeps the shared
+`NETPULSE_*`/`KEENETIC_*` environment contract and is what the integrations
+supervisor consumes — see the table below.
+
+## Configuration (single-unit mode)
 
 Standalone binary environment:
 

@@ -154,7 +154,7 @@ func buildPollers(entries []integration, defaultVersion string, logger *slog.Log
 				APITLS:   entry.APITLS,
 				CACert:   entry.CACert,
 				CertFP:   entry.CertFP,
-			})
+			}, logger)
 			item.Collect = poller.Poll
 		case "opnsense":
 			poller := opnsense.New(opnsense.Config{

@@ -5,6 +5,13 @@ follows Keep a Changelog and semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Log the binary API error before a successful REST fallback. Previously the
+  fallback discarded it and pushed only system data without leaving the failed
+  query in the journal, which made the remaining RouterOS failures impossible
+  to diagnose from the pusher logs (#79).
+
 ## [0.1.7] - 2026-11-16
 
 ### Fixed

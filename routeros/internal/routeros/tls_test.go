@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -350,6 +351,45 @@ func TestRESTHTTPSWithCertificatePin(t *testing.T) {
 	}
 	if data == nil || data.System == nil || data.System.Board.Hostname != "pin-router" {
 		t.Fatalf("REST payload incomplete: %+v", data)
+	}
+}
+
+// A successful REST fallback must not hide the binary API failure: the error
+// names the query that dropped the full payload and is the diagnostic needed
+// when the pushed data contains only system information.
+func TestPollLogsAPIErrorBeforeSuccessfulRESTFallback(t *testing.T) {
+	api := newFakeRouterOSAPI(t, func(cmd string) [][]byte {
+		if cmd == "/interface/print" {
+			return [][]byte{testSentence("!trap", "=category=1", "=message=permission denied")}
+		}
+		return fixtureReply(cmd)
+	})
+	var hits int32
+	srv := httptest.NewTLSServer(restHandler(&hits))
+	t.Cleanup(srv.Close)
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	poller := New(Config{
+		Host:     srv.URL,
+		User:     "reader",
+		Password: "secret",
+		APIPort:  fakePort(t, api.listener),
+		CertFP:   certFingerprint(srv.Certificate()),
+		Timeout:  2 * time.Second,
+	})
+	data, err := poller.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll through the https REST fallback: %v", err)
+	}
+	if data == nil || data.System == nil || data.System.Board.Hostname != "pin-router" {
+		t.Fatalf("REST payload incomplete: %+v", data)
+	}
+	if got := logs.String(); !strings.Contains(got, "routeros api poll failed") || !strings.Contains(got, "query /interface/print") {
+		t.Fatalf("fallback log must name the failed query, got: %q", got)
 	}
 }
 

@@ -276,10 +276,67 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 	// hotspot DB. Without this section the server claims these clients for
 	// the gateway's transit FDB (it sees every mesh client MAC on the port
 	// toward the mesh) and draws them as wired clients of the WRONG unit.
-	if fdb := p.fdbFor(unitMAC, sec.Hotspot, meshHotspot, members); fdb != nil {
-		data.FDB = &probe.FDBData{MACs: fdb}
+	fdb := p.fdbFor(unitMAC, sec.Hotspot, meshHotspot, members)
+	var wirelessSide map[string]string
+	// Mesh children on a wireless backhaul: the member report names the unit
+	// each child attaches to (backhaul.bridge); THIS unit's FDB must learn the
+	// child's base MAC so the server's uplink evidence hangs the child here —
+	// otherwise the gateway's transit FDB claims it and the map draws the
+	// repeater as wired to the gateway. The entry is the backhaul radio band,
+	// the same hint the WirelessSide section carries (the backhaul station
+	// never appears in the association list).
+	if bridgeMAC := data.System.BridgeMAC; bridgeMAC != "" {
+		if childFDB, childSide := meshBackhaulFDB(bridgeMAC, unitMAC, members); len(childFDB) > 0 {
+			if fdb == nil {
+				fdb = map[string]string{}
+			}
+			for mac, band := range childFDB {
+				fdb[mac] = band
+			}
+			wirelessSide = childSide
+		}
+	}
+	if fdb != nil {
+		data.FDB = &probe.FDBData{MACs: fdb, WirelessSide: wirelessSide}
 	}
 	return data, nil
+}
+
+// meshBackhaulFDB returns the mesh members whose wireless backhaul attaches
+// to the unit with the given bridge MAC. unitMAC is the reported unit's own
+// base MAC ("" for the controller): a unit is never its own backhaul child.
+// Only WIRELESS members count: a wired member's backhaul "bridge" falls back
+// to the mesh root, which is not the unit at the other end of the wire — its
+// parent comes from FDB evidence.
+func meshBackhaulFDB(bridgeMAC, unitMAC string, members map[string]translate.MemberInfo) (map[string]string, map[string]string) {
+	bridge := strings.ToUpper(strings.TrimSpace(bridgeMAC))
+	if bridge == "" {
+		return nil, nil
+	}
+	self := strings.ToUpper(strings.TrimSpace(unitMAC))
+	var fdb, side map[string]string
+	for mac, info := range members {
+		if mac == self {
+			continue
+		}
+		bh := translate.MemberBackhaul(info.Raw)
+		if !bh.Wireless || bh.ParentMAC != bridge {
+			continue
+		}
+		label := bh.Band
+		if label == "" {
+			label = "MWS" // backhaul radio of an unknown band: still a real attachment
+		}
+		if fdb == nil {
+			fdb = map[string]string{}
+			side = map[string]string{}
+		}
+		fdb[mac] = label
+		if bh.Band != "" {
+			side[mac] = bh.Band
+		}
+	}
+	return fdb, side
 }
 
 // fdbFor derives the unit's FDB (MAC → physical port) from the hotspot DB.

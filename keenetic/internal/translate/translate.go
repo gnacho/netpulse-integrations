@@ -439,7 +439,54 @@ func MembersMap(raw json.RawMessage) map[string]MemberInfo {
 	return out
 }
 
-// mustRaw re-marshals the typed member document. The shapes above are the
+// MemberBackhaul is the mesh backhaul block of one member document
+// (show/mws/member "backhaul"): it names the unit the member's uplink
+// attaches to. LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): this is the only
+// authoritative mesh-tree source — the association lists do NOT carry the
+// backhaul stations (they list client APs only), and the hotspot DB has no
+// attachment info for directly-attached wireless members.
+//
+//   - Wireless member (uplink "WifiMasterN/WifiStationN", the block carries
+//     "ap" + "rssi"): the member associated to the Backhaul AP of the unit
+//     that owns the "bridge" MAC. LIVE: the controller-attached Buddy reports
+//     bridge "8000.50:ff:20:ae:80:f2" (the controller's bridge) while the
+//     Buddy behind the wired Giga reports "e000.50:ff:20:8e:bf:cb" (the
+//     Giga's base MAC) — the prefix is the STP priority and varies.
+//   - Wired member (uplink GigabitEthernet..., the block carries
+//     "speed"/"duplex"): "bridge" falls back to the mesh ROOT, which is NOT
+//     necessarily the unit at the other end of the wire (a member wired
+//     behind a foreign bridge reports the root). ParentMAC is therefore
+//     only meaningful for wireless members.
+type BackhaulLink struct {
+	Wireless  bool   // STA backhaul (ap/rssi present); false = wired
+	ParentMAC string // bridge MAC of the attachment unit, normalized; "" unknown
+	Band      string // band of the backhaul radio ("5 GHz"); "" unknown
+}
+
+// MemberBackhaul parses one member document (show/mws/member entry) and
+// returns its backhaul block.
+func MemberBackhaul(raw json.RawMessage) BackhaulLink {
+	var doc struct {
+		Backhaul struct {
+			Bridge string `json:"bridge"`
+			AP     string `json:"ap"`
+		} `json:"backhaul"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &doc) != nil {
+		return BackhaulLink{}
+	}
+	bh := doc.Backhaul
+	out := BackhaulLink{Wireless: strings.TrimSpace(bh.AP) != ""}
+	// "<stp-priority>.<mac>": the MAC follows the first dot (Keenetic formats
+	// MACs with colons, so the dot is unambiguous).
+	if _, mac, ok := strings.Cut(bh.Bridge, "."); ok {
+		out.ParentMAC = NormalizeMAC(mac)
+	}
+	if out.Wireless {
+		out.Band, _ = bandFromAPID(bh.AP)
+	}
+	return out
+} // mustRaw re-marshals the typed member document. The shapes above are the
 // ones the parser read; re-marshalling keeps the raw document stable without
 // a second parse of the original bytes.
 func mustRaw(m memberDoc) json.RawMessage {

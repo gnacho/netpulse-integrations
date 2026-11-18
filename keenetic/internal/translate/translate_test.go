@@ -115,6 +115,47 @@ func TestSystemControllerLive(t *testing.T) {
 	}
 }
 
+func TestMemberBackhaul(t *testing.T) {
+	members := MembersMap(fixture(t, "mws_member_mesh.json"))
+	if len(members) != 3 {
+		t.Fatalf("members = %d, want 3", len(members))
+	}
+	// LIVE shapes (2026-11-18): the controller-attached Buddy reports the
+	// controller's bridge with the mesh-root priority prefix; the Buddy behind
+	// the wired Giga reports the GIGA's base MAC with a different (e000)
+	// prefix — the prefix varies, the MAC is the attachment unit.
+	wifi := MemberBackhaul(members["02:AD:EF:C1:80:8A"].Raw)
+	if !wifi.Wireless {
+		t.Fatalf("wireless member = %+v", wifi)
+	}
+	if wifi.ParentMAC != "02:AD:EF:AE:80:F2" {
+		t.Fatalf("wireless parent = %q, want the controller's bridge", wifi.ParentMAC)
+	}
+	if wifi.Band != "5 GHz" {
+		t.Fatalf("band = %q, want 5 GHz (WifiMaster1/Backhaul0)", wifi.Band)
+	}
+	// The chained Buddy reports the Giga as its attachment unit.
+	chained := MemberBackhaul(members["02:AD:EF:B7:1E:03"].Raw)
+	if !chained.Wireless {
+		t.Fatalf("chained member = %+v", chained)
+	}
+	if chained.ParentMAC != "02:AD:EF:8E:BF:CB" {
+		t.Fatalf("chained parent = %q, want the Giga's base MAC", chained.ParentMAC)
+	}
+	// A wired member's bridge falls back to the mesh root: ParentMAC is set,
+	// but it is NOT a wireless attachment (the poller must not claim it).
+	cable := MemberBackhaul(members["02:AD:EF:8E:BF:CB"].Raw)
+	if cable.Wireless {
+		t.Fatalf("wired member parsed as wireless: %+v", cable)
+	}
+	if cable.Band != "" {
+		t.Fatalf("wired member band = %q", cable.Band)
+	}
+	if MemberBackhaul(nil).ParentMAC != "" {
+		t.Fatal("nil backhaul must yield empty")
+	}
+}
+
 func TestSystemMemberFromMeshList(t *testing.T) {
 	members := MembersMap(fixture(t, "mws_member_mesh.json"))
 	if len(members) != 3 {

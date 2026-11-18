@@ -170,10 +170,24 @@ func TestPollControllerUnit(t *testing.T) {
 	if _, ok := data.FDB.MACs["0E:00:00:AA:BB:CC"]; ok {
 		t.Fatal("member-attached wired client leaked into the controller fdb")
 	}
-	// The member itself (its base MAC in the hotspot DB with an mws port) is
-	// infrastructure, not a client.
-	if _, ok := data.FDB.MACs["02:AD:EF:C1:80:8A"]; ok {
-		t.Fatal("mesh member base MAC leaked into the controller fdb")
+	// Mesh children on a wireless backhaul: the controller's FDB must learn
+	// the child whose member backhaul.bridge names the controller's bridge.
+	// Without it the server's uplink evidence hangs the repeater off the
+	// gateway's transit FDB (it sees the child MAC on the port toward the
+	// mesh). The band label doubles as the WirelessSide hint.
+	if got := data.FDB.MACs["02:AD:EF:C1:80:8A"]; got != "5 GHz" {
+		t.Fatalf("controller fdb[wifi backhaul child] = %q, want 5 GHz", got)
+	}
+	if got := data.FDB.WirelessSide["02:AD:EF:C1:80:8A"]; got != "5 GHz" {
+		t.Fatalf("controller wirelessSide[child] = %q, want 5 GHz", got)
+	}
+	// The Giga's backhaul is WIRED (bridge falls back to the mesh root — not
+	// evidence of attachment) and the chained Buddy belongs to the Giga's
+	// payload: neither may be claimed here.
+	for _, mac := range []string{"02:AD:EF:8E:BF:CB", "02:AD:EF:B7:1E:03"} {
+		if _, ok := data.FDB.MACs[mac]; ok {
+			t.Fatalf("mesh member %s must not be a controller fdb entry", mac)
+		}
 	}
 	// AP-mode unit behind a gateway: no WAN section, no rates (5.x has no
 	// interface counters).
@@ -196,6 +210,11 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 
 	// The member's own RCI answers with the extender fixtures.
 	member := newFakeRCI(t, fixtureDir(t), true)
+	// The member's show/interface must carry the MEMBER's identity (live:
+	// the bridge MAC of an extender is its base MAC), not the controller's
+	// fixture.
+	member.paths["show/interface"] = strings.ReplaceAll(
+		member.paths["show/interface"], "ae:80:f2", "c1:80:8a")
 
 	// Rewrite the member's management address in the controller's member
 	// list so the poller finds it there, and make the available firmware
@@ -268,6 +287,60 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 	}
 	if len(data.FDB.MACs) != 1 {
 		t.Fatalf("member fdb = %+v, want exactly the one wired client", data.FDB.MACs)
+	}
+}
+
+func TestPollMeshMemberBackhaulChildren(t *testing.T) {
+	// The Giga (8e:bf:cb) bridges for the Buddy chained behind it: the Buddy's
+	// member backhaul.bridge names the GIGA (live shape "e000.<giga base>",
+	// priority prefix varies). The Giga's own FDB must learn the child's base
+	// MAC so the server hangs the child's uplink off the Giga, not off the
+	// gateway's transit FDB.
+	controller := newFakeRCI(t, fixtureDir(t), false)
+	giga := newFakeRCI(t, fixtureDir(t), true)
+	// The Giga's own interface fixture must carry ITS identity (live: the
+	// bridge MAC of an extender is its base MAC).
+	giga.paths["show/interface"] = strings.ReplaceAll(
+		giga.paths["show/interface"], "ae:80:f2", "8e:bf:cb")
+
+	memberJSON, _ := os.ReadFile(filepath.Join(fixtureDir(t), "mws_member_mesh.json"))
+	var list []map[string]any
+	if err := json.Unmarshal(memberJSON, &list); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	list[1]["ip"] = strings.TrimPrefix(giga.server.URL, "http://")
+	rewritten, _ := json.Marshal(list)
+	controller.paths["show/mws/member"] = string(rewritten)
+
+	p, err := New(Config{
+		Host:     controller.server.URL,
+		User:     "viewer",
+		Password: "x",
+		UnitMAC:  "02:AD:EF:8e:bf:cb",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if data.System == nil || data.System.Backhaul != "cable" {
+		t.Fatalf("backhaul = %+v, want cable (the Giga is wired)", data.System)
+	}
+	if data.FDB == nil || data.FDB.MACs == nil {
+		t.Fatal("member payload must carry a fresh FDB section")
+	}
+	if got := data.FDB.MACs["02:AD:EF:B7:1E:03"]; got != "5 GHz" {
+		t.Fatalf("giga fdb[chained buddy] = %q, want 5 GHz", got)
+	}
+	if got := data.FDB.WirelessSide["02:AD:EF:B7:1E:03"]; got != "5 GHz" {
+		t.Fatalf("giga wirelessSide[chained buddy] = %q, want 5 GHz", got)
+	}
+	// The controller-attached Buddy belongs to the controller's payload, not
+	// to the Giga's.
+	if _, ok := data.FDB.MACs["02:AD:EF:C1:80:8A"]; ok {
+		t.Fatal("controller-attached buddy leaked into the giga fdb")
 	}
 }
 

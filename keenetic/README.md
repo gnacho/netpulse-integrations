@@ -128,6 +128,7 @@ never commit it.
 | `show/version` | `system.board` | Model, hardware id, release. |
 | `show/system` | `system.cpu`, `system.sysinfo` | CPU load %, uptime, memory. Keenetic reports KiB; converted to bytes. |
 | `show/mws/member` | `system.firmwareAvailable`, `system.backhaul`, per-member `system` | Controller-only source; the member entry is matched by base MAC. Backhaul medium: `rssi` in the backhaul object = wifi, `speed`/`duplex` = cable. |
+| `show/mws/member` | `fdb` (+`wirelessSide`) | Mesh tree: for a WIRELESS member, `backhaul.bridge` (STP prefix + MAC) names the unit it associates with — that unit's FDB learns the child's base MAC (label = backhaul band), so the server hangs the repeater's uplink off its real parent instead of the gateway transit. A wired member's `bridge` falls back to the mesh root and is ignored. |
 | `show/associations` | `wireless.clients`, `wireless.radios` | The unit's OWN clients (each unit answers for itself). Band from the `WifiMasterN` index of the AP interface. Station rx/tx counters are cumulative since association; the server computes the rates. |
 | `show/interface` | radio summary (BSSID per band) | KeeneticOS 5.1 exposes no channel, width, tx power or per-interface byte counters — those fields stay absent rather than invented. |
 | `show/ip/hotspot` (controller only) | `dhcp.reservations` | Known-host names pinned to MACs without addresses (same rule as the UniFi integration). Keenetic's auto-registration templates (`<MAC> - <segment> - <date>`) are skipped as noise. |

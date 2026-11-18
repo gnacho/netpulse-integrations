@@ -126,7 +126,7 @@
     "backhaul": {
       "uplink": "WifiMaster1/WifiStation0",
       "root": "8000.02:AD:EF:ae:80:f2",
-      "bridge": "8000.02:AD:EF:ae:80:f2",
+      "bridge": "e000.02:AD:EF:8e:bf:cb",
       "cost": 150,
       "ap": "WifiMaster1/Backhaul0",
       "psm": false,

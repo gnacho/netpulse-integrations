@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.5 — 2026-11-18
+
+Mesh tree: wireless-backhaul repeaters are attributed to the unit they
+associate with, not to the gateway.
+
+- The member report's `backhaul.bridge` (STP priority prefix + MAC) is the
+  authoritative attachment unit for a WIRELESS member (the block carries
+  `ap` + `rssi`): the controller-attached Buddy reports the controller's
+  bridge, a Buddy chained behind the wired Giga reports the Giga's base MAC.
+  The association lists do not carry backhaul stations at all, and the
+  hotspot DB has no attachment info for directly-attached wireless members.
+- The parent unit's payload now learns the child's base MAC in its FDB
+  (port label = backhaul radio band, plus the WirelessSide hint). The
+  server's uplink evidence picks the deepest candidate, so the repeater's
+  uplink link is drawn from its real parent (amber dashed "WiFi uplink")
+  instead of the gateway's transit FDB.
+- A wired member's `backhaul.bridge` falls back to the mesh root and is NOT
+  used — its parent keeps coming from FDB evidence.
+- Mesh re-parenting (a repeater roaming to another unit's backhaul) is
+  tracked automatically: the next cycle moves the FDB entry to the new
+  parent.
+
 ## 0.1.4 — 2026-11-18
 
 Topology: wired clients are attributed to the Keenetic unit they are

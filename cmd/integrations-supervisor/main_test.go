@@ -49,6 +49,22 @@ func TestBuildPollersRegistersOPNsense(t *testing.T) {
 	}
 }
 
+func TestBuildPollersRegistersKeenetic(t *testing.T) {
+	pollers, err := buildPollers([]integration{{
+		Type: "keenetic", Slug: "keenetic-ap1", Token: "token", Host: "192.0.2.1",
+		User: "reader", Password: "secret", MAC: "AA:BB:CC:DD:EE:01",
+	}}, "test", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pollers) != 1 {
+		t.Fatalf("pollers = %d, want 1", len(pollers))
+	}
+	if pollers[0].Vendor != "keenetic" || pollers[0].Collect == nil {
+		t.Fatalf("Keenetic supervisor poller = %+v", pollers[0])
+	}
+}
+
 func writeConfig(t *testing.T, cfg fileConfig) string {
 	t.Helper()
 	data, err := json.Marshal(cfg)

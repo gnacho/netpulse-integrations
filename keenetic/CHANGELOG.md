@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The shared integrations supervisor accepts `"type": "keenetic"` entries (one
+  per unit; a mesh member adds `mac`), completing the supervisor deployment
+  shape documented in the README.
+
 ## 0.1.5 — 2026-11-18
 
 Mesh tree: wireless-backhaul repeaters are attributed to the unit they

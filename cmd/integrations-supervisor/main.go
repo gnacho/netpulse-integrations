@@ -16,6 +16,7 @@ import (
 	"github.com/gnacho/netpulse-integrations/asuswrt"
 	"github.com/gnacho/netpulse-integrations/bbox"
 	"github.com/gnacho/netpulse-integrations/fn"
+	"github.com/gnacho/netpulse-integrations/keenetic"
 	"github.com/gnacho/netpulse-integrations/internal/push"
 	"github.com/gnacho/netpulse-integrations/internal/supervisor"
 	"github.com/gnacho/netpulse-integrations/opnsense"
@@ -57,6 +58,9 @@ type integration struct {
 	// ignore these.
 	SSHHostFP string `json:"ssh_host_fp,omitempty"`
 	NoCLI     bool   `json:"no_cli,omitempty"`
+	// MAC is Keenetic-only: the base MAC of the mesh member this entry
+	// reports. Empty means the entry reports the unit `host` points at.
+	MAC string `json:"mac,omitempty"`
 }
 
 func main() {
@@ -176,6 +180,18 @@ func buildPollers(entries []integration, defaultVersion string, logger *slog.Log
 				HostFP:   entry.SSHHostFP,
 				NoCLI:    entry.NoCLI,
 			}, logger)
+			item.Collect = poller.Poll
+		case "keenetic":
+			poller, err := keenetic.New(keenetic.Config{
+				Host:        entry.Host,
+				User:        entry.User,
+				Password:    entry.Password,
+				UnitMAC:     entry.MAC,
+				InsecureTLS: entry.Insecure,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("integration %d (keenetic): %w", i, err)
+			}
 			item.Collect = poller.Poll
 		case "asuswrt":
 			collector := asuswrt.NewCollector(probe.ShellRunner{}, item.Slug, item.Version)

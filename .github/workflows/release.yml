@@ -7,6 +7,7 @@ on:
       - 'asuswrt/v*'
       - 'bbox/v*'
       - 'fn/v*'
+      - 'keenetic/v*'
       - 'opnsense/v*'
       - 'unifi/v*'
 
@@ -66,6 +67,13 @@ jobs:
               name=fn
               binary=fn-pusher
               target=./fn/cmd/fn-pusher
+              ldvar=main.Version
+              arches="amd64 arm64"
+              ;;
+            keenetic/v*)
+              name=keenetic
+              binary=keenetic-pusher
+              target=./keenetic/cmd/keenetic-pusher
               ldvar=main.Version
               arches="amd64 arm64"
               ;;

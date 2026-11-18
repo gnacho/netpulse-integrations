@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — 2026-11-18
+
+Firmware honesty fix: no phantom update, no build hash as the version.
+
+- The mesh report always carries `fw-available`, even on an up-to-date unit
+  (both `fw` and `fw-available` = "5.1.8"). NetPulse treats any non-empty
+  firmwareAvailable as "an update is pending", so the poller reported a
+  permanent "available: 5.1.8" badge on a current version. An
+  `fw-available` equal to the installed `fw` is now omitted; only a
+  genuinely different version is reported.
+- On KeeneticOS 5.1 `ndm.exact` is a build-only suffix ("0-d43bd79") and
+  `show/version` answers no `ndm.version`; the build hash used to surface
+  as the installed firmware in the UI. The version now comes from the
+  member report's `fw` field (mesh members) or `title` ("5.1.8"), with the
+  vendor release id ("5.01.C.8.0-2") as last fallback; the exact build id
+  is kept as the description only when it embeds the version.
+
 ## 0.1.2 — 2026-11-18
 
 Session reuse: one authentication per router instead of one per cycle.

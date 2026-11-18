@@ -175,10 +175,18 @@ type ifacesDoc map[string]ifaceDoc
 // Mapping entry points
 // ---------------------------------------------------------------------------
 
-// Board maps show/version into BoardInfo. Hostname arrives separately (the
-// caller fills it from show/system, which also carries it on firmware that
-// keeps version minimal).
-func Board(raw json.RawMessage) *probe.BoardInfo {
+// Board maps show/version (plus the mesh member entry, when one exists) into
+// BoardInfo. Hostname arrives separately (the caller fills it from
+// show/system, which also carries it on firmware that keeps version minimal).
+//
+// LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): ndm carries no "version" field
+// and its "exact" is a build-only suffix ("0-d43bd79") — reporting either as
+// the firmware version made NetPulse show the build hash as the installed
+// firmware. The honest version lives in title ("5.1.8") and, for a mesh
+// member, in the member report's "fw" field; the vendor release id
+// ("5.01.C.8.0-2") is a channel designation that does not compare as a
+// version, so it is the LAST fallback.
+func Board(raw json.RawMessage, member json.RawMessage) *probe.BoardInfo {
 	if len(raw) == 0 {
 		return nil
 	}
@@ -196,14 +204,38 @@ func Board(raw json.RawMessage) *probe.BoardInfo {
 	b := &probe.BoardInfo{Model: model, BoardName: v.HWID}
 	b.Release.Version = v.NDM.Version
 	if b.Release.Version == "" {
-		b.Release.Version = v.Release
+		b.Release.Version = memberFW(member)
 	}
 	if b.Release.Version == "" {
 		b.Release.Version = v.Title
 	}
+	if b.Release.Version == "" {
+		b.Release.Version = v.Release
+	}
+	// The exact build id is a useful detail only when it names the version
+	// with it ("5.1.8.0-d43bd79"); a build-only suffix ("0-d43bd79") displayed
+	// alone reads like a wrong firmware. The version string is the honest
+	// display fallback.
 	b.Release.Description = v.NDM.Exact
+	if dottedVersion.FindString(b.Release.Description) == "" {
+		b.Release.Description = b.Release.Version
+	}
 	return b
 }
+
+// memberFW extracts the mesh member's installed firmware ("fw" field, e.g.
+// "5.1.8"); "" when the entry is absent or does not carry one.
+func memberFW(raw json.RawMessage) string {
+	var mem memberDoc
+	if len(raw) == 0 || json.Unmarshal(raw, &mem) != nil {
+		return ""
+	}
+	return mem.FW
+}
+
+// dottedVersion matches the first dotted numeric version inside a string
+// ("5.1.8", "5.1.8.0-d43bd79"); empty for build-only suffixes ("0-d43bd79").
+var dottedVersion = regexp.MustCompile(`\d+(?:\.\d+)+`)
 
 // System maps show/system plus the mesh member entry (when the unit is a mesh
 // member) into SystemData. The member entry wins where it is richer: it also
@@ -248,7 +280,13 @@ func System(raw json.RawMessage, member json.RawMessage) *probe.SystemData {
 					}
 				}
 			}
-			if mem.FWAvailable != "" {
+			// LIVE FINDING (2026-11-18): the mesh report ALWAYS carries
+			// "fw-available", even when it equals the installed "fw" (both
+			// "5.1.8" on an up-to-date unit). The NetPulse contract treats a
+			// non-empty firmwareAvailable as "an update is pending", so an
+			// equal value must be omitted — reporting it produced a permanent
+			// "update available" badge pointing at the same version.
+			if mem.FWAvailable != "" && mem.FWAvailable != mem.FW {
 				out.FirmwareAvailable = mem.FWAvailable
 			}
 			// Backhaul medium. LIVE FINDING: the backhaul object is present
@@ -330,7 +368,7 @@ func WanInterfaceID(raw json.RawMessage) string {
 // the poller's business: they need cross-section state it already holds.
 func Payload(sec Section) *probe.PayloadData {
 	sys := System(sec.System, sec.Member)
-	board := Board(sec.Version)
+	board := Board(sec.Version, sec.Member)
 	if board != nil {
 		if hostname := Hostname(sec.System); hostname != "" {
 			board.Hostname = hostname

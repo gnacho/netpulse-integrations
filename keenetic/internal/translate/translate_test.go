@@ -3,6 +3,7 @@ package translate
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -40,19 +41,52 @@ func TestNormalizeMAC(t *testing.T) {
 }
 
 func TestBoardLive(t *testing.T) {
-	b := Board(fixture(t, "version_5_1.json"))
+	b := Board(fixture(t, "version_5_1.json"), nil)
 	if b == nil {
 		t.Fatal("Board = nil")
 	}
 	if b.Model != "Ultra (KN-0000)" || b.BoardName != "KN-0000" {
 		t.Fatalf("model/board = %q/%q", b.Model, b.BoardName)
 	}
-	// LIVE: KeeneticOS 5.1 answers no ndm.version; the release string wins.
-	if b.Release.Version != "5.01.C.8.0-2" {
+	// LIVE: KeeneticOS 5.1 answers no ndm.version; the human version lives in
+	// title ("5.1.8"). The vendor release id ("5.01.C.8.0-2") is the LAST
+	// fallback — it does not compare as a version.
+	if b.Release.Version != "5.1.8" {
 		t.Fatalf("release.version = %q", b.Release.Version)
+	}
+	// LIVE: ndm.exact is a build-only suffix ("0-build1234" here, "0-d43bd79"
+	// on the live unit) — useless alone as the firmware display string, which
+	// NetPulse takes from the description. The version string wins.
+	if b.Release.Description != "5.1.8" {
+		t.Fatalf("release.description = %q", b.Release.Description)
 	}
 	if b.Hostname != "" {
 		t.Fatalf("hostname must come from show/system, got %q", b.Hostname)
+	}
+}
+
+func TestBoardMemberFWWins(t *testing.T) {
+	// A mesh member's version comes from the member report's "fw" field even
+	// when show/version keeps it minimal (title empty is hypothetical, the
+	// member fw is live-confirmed).
+	const noTitle = `{"release":"5.01.C.8.0-2","model":"Giga (KN-1011)","hw_id":"KN-1011","ndm":{"exact":"0-d43bd79"}}`
+	member := MembersMap(fixture(t, "mws_member_mesh.json"))["02:AD:EF:8E:BF:CB"].Raw
+	b := Board(json.RawMessage(noTitle), member)
+	if b == nil {
+		t.Fatal("Board = nil")
+	}
+	// memberFW takes the first member entry's fw ("5.1.8").
+	if b.Release.Version != "5.1.8" {
+		t.Fatalf("release.version = %q, want the member's fw", b.Release.Version)
+	}
+	if b.Release.Description != "5.1.8" {
+		t.Fatalf("release.description = %q", b.Release.Description)
+	}
+	// An exact build id that embeds the version stays untouched.
+	const full = `{"release":"5.1","model":"Giga (KN-1011)","hw_id":"KN-1011","ndm":{"version":"5.1.8","exact":"5.1.8.0-d43bd79"}}`
+	b = Board(json.RawMessage(full), nil)
+	if b.Release.Version != "5.1.8" || b.Release.Description != "5.1.8.0-d43bd79" {
+		t.Fatalf("version/description = %q/%q", b.Release.Version, b.Release.Description)
 	}
 }
 
@@ -124,6 +158,28 @@ func TestSystemMemberFromMeshList(t *testing.T) {
 	}
 	if s.SysInfo.Memory.Total != 536870912 {
 		t.Fatalf("memory total = %v", s.SysInfo.Memory.Total)
+	}
+}
+
+func TestSystemFirmwareAvailableOnlyOnDifference(t *testing.T) {
+	// LIVE (2026-11-18): the mesh report carries fw-available = fw = "5.1.8"
+	// on an up-to-date unit. NetPulse treats any non-empty firmwareAvailable
+	// as "update pending", so an equal value must be omitted — otherwise the
+	// UI shows a permanent "available: 5.1.8" badge on the current version.
+	member := MembersMap(fixture(t, "mws_member_mesh.json"))["02:AD:EF:8E:BF:CB"].Raw
+	s := System(nil, member)
+	if s == nil {
+		t.Fatal("System = nil")
+	}
+	if s.FirmwareAvailable != "" {
+		t.Fatalf("fw-available == fw must stay absent, got %q", s.FirmwareAvailable)
+	}
+	// A genuinely newer available version IS reported. The member doc here is
+	// the re-marshalled compact form MembersMap hands the caller.
+	newer := strings.Replace(string(member), `"fw-available":"5.1.8"`, `"fw-available":"5.2"`, 1)
+	s = System(nil, json.RawMessage(newer))
+	if s == nil || s.FirmwareAvailable != "5.2" {
+		t.Fatalf("newer fw-available lost: %+v", s)
 	}
 }
 

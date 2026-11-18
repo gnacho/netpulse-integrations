@@ -181,13 +181,16 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 	member := newFakeRCI(t, fixtureDir(t), true)
 
 	// Rewrite the member's management address in the controller's member
-	// list so the poller finds it there.
+	// list so the poller finds it there, and make the available firmware
+	// differ from the installed one ("5.1.8"/"5.1.8" in the fixture would be
+	// an up-to-date unit, which must NOT report firmwareAvailable).
 	memberJSON, _ := os.ReadFile(filepath.Join(fixtureDir(t), "mws_member_mesh.json"))
 	var list []map[string]any
 	if err := json.Unmarshal(memberJSON, &list); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
 	list[0]["ip"] = strings.TrimPrefix(member.server.URL, "http://")
+	list[0]["fw-available"] = "5.2.0"
 	rewritten, _ := json.Marshal(list)
 	controller.paths["show/mws/member"] = string(rewritten)
 
@@ -209,8 +212,16 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 	if data.System == nil || data.System.CPU == nil || *data.System.CPU != 4 {
 		t.Fatalf("member cpu = %+v (want the extender's own show/system)", data.System)
 	}
-	if data.System.FirmwareAvailable != "5.1.8" {
+	if data.System.FirmwareAvailable != "5.2.0" {
 		t.Fatalf("fw-available from the member list = %q", data.System.FirmwareAvailable)
+	}
+	// The firmware version display string is the member's "fw", not the
+	// build suffix ndm.exact carries on 5.1 ("0-build1234" in the fixture).
+	if data.System.Board == nil || data.System.Board.Release.Version != "5.1.8" {
+		t.Fatalf("firmware version = %+v, want the member's fw 5.1.8", data.System.Board)
+	}
+	if data.System.Board.Release.Description != "5.1.8" {
+		t.Fatalf("firmware description = %q, want the version, not the build hash", data.System.Board.Release.Description)
 	}
 	if data.System.Backhaul != "wifi" {
 		t.Fatalf("backhaul = %q, want wifi", data.System.Backhaul)

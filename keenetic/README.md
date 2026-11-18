@@ -131,6 +131,7 @@ never commit it.
 | `show/associations` | `wireless.clients`, `wireless.radios` | The unit's OWN clients (each unit answers for itself). Band from the `WifiMasterN` index of the AP interface. Station rx/tx counters are cumulative since association; the server computes the rates. |
 | `show/interface` | radio summary (BSSID per band) | KeeneticOS 5.1 exposes no channel, width, tx power or per-interface byte counters — those fields stay absent rather than invented. |
 | `show/ip/hotspot` (controller only) | `dhcp.reservations` | Known-host names pinned to MACs without addresses (same rule as the UniFi integration). Keenetic's auto-registration templates (`<MAC> - <segment> - <date>`) are skipped as noise. |
+| `show/ip/hotspot` (controller only) | `fdb` | Wired clients per unit as MAC → physical port. The host's top-level `port` is the port on the reporting unit; the `mws` block (`cid` + `port`) is the port ON that mesh member. This is the only mesh-wide topology source on 5.1 — the units themselves 404 the section. |
 | `show/ip/arp` | `arp` | MAC → IPv4 of the unit's LAN view. |
 | `show/ip/dhcp/binding(s)` | `dhcp.leases` | Only when the unit really answers (it is the DHCP server). An extender 404s and the section stays absent. |
 | `show/internet/status` | `wan` | Only when the answer carries a public address: a unit behind a gateway (bridge/AP mode) reports none and the section stays nil. |

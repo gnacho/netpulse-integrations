@@ -158,6 +158,23 @@ func TestPollControllerUnit(t *testing.T) {
 	if data.DHCP == nil || len(data.DHCP.Reservations) == 0 {
 		t.Fatal("name reservations missing on the controller payload")
 	}
+	// Wired clients of the controller itself, learned from the hotspot DB
+	// ("server" host carries top-level port "1"). A member-attached client
+	// must NOT land here — it belongs to that member's payload.
+	if data.FDB == nil || data.FDB.MACs == nil {
+		t.Fatal("controller payload must carry a fresh FDB section")
+	}
+	if got := data.FDB.MACs["0E:00:00:00:0C:80"]; got != "Port 1" {
+		t.Fatalf("controller fdb[server] = %q, want Port 1", got)
+	}
+	if _, ok := data.FDB.MACs["0E:00:00:AA:BB:CC"]; ok {
+		t.Fatal("member-attached wired client leaked into the controller fdb")
+	}
+	// The member itself (its base MAC in the hotspot DB with an mws port) is
+	// infrastructure, not a client.
+	if _, ok := data.FDB.MACs["02:AD:EF:C1:80:8A"]; ok {
+		t.Fatal("mesh member base MAC leaked into the controller fdb")
+	}
 	// AP-mode unit behind a gateway: no WAN section, no rates (5.x has no
 	// interface counters).
 	if data.Wan != nil {
@@ -237,6 +254,20 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 	// payload — names live on the controller's payload.
 	if data.DHCP != nil && len(data.DHCP.Reservations) > 0 {
 		t.Fatalf("extender must not fabricate names: %+v", data.DHCP.Reservations)
+	}
+	// Topology: the member's wired clients are claimed HERE, from the
+	// controller's hotspot DB (the "aa:bb:cc" host carries the member's cid
+	// and mws.port). Without this section the gateway's transit FDB claimed
+	// them and drew them as wired clients of the WRONG unit. The dormant
+	// host (active=false) and the member's own base MAC must not appear.
+	if data.FDB == nil || data.FDB.MACs == nil {
+		t.Fatal("member payload must carry a fresh FDB section (the controller hotspot answered)")
+	}
+	if got := data.FDB.MACs["0E:00:00:AA:BB:CC"]; got != "Port 4" {
+		t.Fatalf("member fdb[wired client] = %q, want Port 4", got)
+	}
+	if len(data.FDB.MACs) != 1 {
+		t.Fatalf("member fdb = %+v, want exactly the one wired client", data.FDB.MACs)
 	}
 }
 

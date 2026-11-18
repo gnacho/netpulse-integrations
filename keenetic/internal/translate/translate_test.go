@@ -183,6 +183,42 @@ func TestSystemFirmwareAvailableOnlyOnDifference(t *testing.T) {
 	}
 }
 
+func TestHotspotWiredClients(t *testing.T) {
+	// LIVE shapes (2026-11-18): a controller-attached wired host carries a
+	// top-level "port"; a member-attached one carries the mws block with the
+	// member's cid and the physical port ON that member; a wireless one
+	// carries mws.ap; a dormant host is active=false.
+	const doc = `{"host":[
+		{"mac":"0e:00:00:00:0c:80","active":true,"port":"1"},
+		{"mac":"ec:a9:07:0d:1c:41","active":true,"mws":{"cid":"cid-7281","port":"4","speed":1000,"duplex":true}},
+		{"mac":"a0:a3:b3:fb:5a:a8","active":true,"mws":{"cid":"cid-7281","ap":"WifiMaster0/AccessPoint0"}},
+		{"mac":"0e:00:00:00:00:99","active":false,"mws":{"cid":"cid-7281","port":"3"}},
+		{"mac":"0e:00:00:00:00:98","active":true,"mws":{"cid":"cid-7281","port":""}},
+		{"mac":"0e:00:00:00:00:97","active":true,"mws":{"port":"2"}},
+		{"mac":"00:0e:00:00:3e:10","active":true,"port":"5","mws-backhaul":true}
+	]}`
+	got := HotspotWiredClients(json.RawMessage(doc))
+	want := []HotspotClient{
+		{MAC: "0E:00:00:00:0C:80", Port: "Port 1"},
+		{MAC: "EC:A9:07:0D:1C:41", Port: "Port 4", MemberCID: "cid-7281"},
+		{MAC: "00:0E:00:00:3E:10", Port: "Port 5"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("clients = %+v, want %d entries", got, len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("client[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if HotspotWiredClients(nil) != nil {
+		t.Fatal("nil hotspot must yield nil")
+	}
+	if HotspotWiredClients(json.RawMessage(`{"host":[]}`)) == nil {
+		t.Fatal("an empty hotspot is a valid answer, not a failed probe")
+	}
+}
+
 func TestWirelessControllerLive(t *testing.T) {
 	w := Wireless(fixture(t, "associations_controller.json"), nil)
 	if w == nil {

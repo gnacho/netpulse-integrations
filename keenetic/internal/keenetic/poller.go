@@ -158,14 +158,22 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return p.pollUnit(ctx, api, p.cfg.UnitMAC, members)
+	// A member's wired-client topology comes from the controller's hotspot
+	// DB (the only mesh-wide source; the member itself 404s the section).
+	var meshHotspot json.RawMessage
+	if p.cfg.UnitMAC != "" {
+		meshHotspot = p.section(ctx, api, "show/ip/hotspot")
+	}
+	return p.pollUnit(ctx, api, p.cfg.UnitMAC, members, meshHotspot)
 }
 
 // pollUnit builds the payload of one unit. api is the client the section
 // queries go to (the member directly when one is selected, the configured
 // host otherwise); members is the mesh report ALREADY fetched from the
 // controller — the fleet shape fetches it once per cycle for all units.
-func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo) (*probe.PayloadData, error) {
+// meshHotspot is the controller's show/ip/hotspot answer, fetched once per
+// fleet cycle; it is the source of the member's wired-client FDB.
+func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo, meshHotspot json.RawMessage) (*probe.PayloadData, error) {
 	var member json.RawMessage
 	if unitMAC != "" {
 		info, ok := members[unitMAC]
@@ -263,7 +271,63 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 			}
 		}
 	}
+
+	// Topology: wired clients as FDB entries, learned from the controller's
+	// hotspot DB. Without this section the server claims these clients for
+	// the gateway's transit FDB (it sees every mesh client MAC on the port
+	// toward the mesh) and draws them as wired clients of the WRONG unit.
+	if fdb := p.fdbFor(unitMAC, sec.Hotspot, meshHotspot, members); fdb != nil {
+		data.FDB = &probe.FDBData{MACs: fdb}
+	}
 	return data, nil
+}
+
+// fdbFor derives the unit's FDB (MAC → physical port) from the hotspot DB.
+// The controller claims the hosts attached to itself; a member claims the
+// hosts whose mws.cid matches its own cid. nil = the source section is
+// unavailable this cycle (keep the last good FDB); an EMPTY map is a valid
+// fresh answer (no wired clients right now — clears stale entries).
+func (p *Poller) fdbFor(unitMAC string, ownHotspot, meshHotspot json.RawMessage, members map[string]translate.MemberInfo) map[string]string {
+	var raw json.RawMessage
+	var wantCID string
+	if unitMAC == "" {
+		raw = ownHotspot
+	} else {
+		info, ok := members[unitMAC]
+		if !ok || len(meshHotspot) == 0 {
+			return nil
+		}
+		raw = meshHotspot
+		wantCID = info.CID
+		if wantCID == "" {
+			return nil
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	exclude := map[string]bool{}
+	for mac := range members {
+		exclude[mac] = true
+	}
+	if unitMAC != "" {
+		exclude[unitMAC] = true
+	}
+	out := map[string]string{}
+	for _, c := range translate.HotspotWiredClients(raw) {
+		if exclude[c.MAC] {
+			continue
+		}
+		if unitMAC == "" {
+			if c.MemberCID != "" {
+				continue // belongs to that member's payload
+			}
+		} else if c.MemberCID != wantCID {
+			continue
+		}
+		out[c.MAC] = c.Port
+	}
+	return out
 }
 
 // section queries one optional section; any failure (404 on this firmware,

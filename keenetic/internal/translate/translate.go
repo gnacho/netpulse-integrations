@@ -131,6 +131,12 @@ type hotspotDoc struct {
 		Registered *bool  `json:"registered"`
 		RxBytes    uint64 `json:"rxbytes"` // fixture: confirm counter semantics before mapping to clientBw
 		TxBytes    uint64 `json:"txbytes"`
+		Port       string `json:"port"` // physical switch port when wired to the reporting unit
+		MWS        struct {
+			CID  string `json:"cid"`  // mesh member the host is attached behind
+			Port string `json:"port"` // physical port ON THAT MEMBER (wired host)
+			AP   string `json:"ap"`   // AP interface on that member (wireless host)
+		} `json:"mws"`
 	} `json:"host"`
 }
 
@@ -411,6 +417,7 @@ type MemberInfo struct {
 	Raw json.RawMessage
 	IP  string // management IPv4 of the member (direct queries)
 	MAC string // normalized base MAC
+	CID string // mesh member id (the hotspot DB keys attached hosts by it)
 }
 
 func MembersMap(raw json.RawMessage) map[string]MemberInfo {
@@ -427,7 +434,7 @@ func MembersMap(raw json.RawMessage) map[string]MemberInfo {
 		if mac == "" {
 			continue
 		}
-		out[mac] = MemberInfo{Raw: mustRaw(m), IP: strings.TrimSpace(m.IP), MAC: mac}
+		out[mac] = MemberInfo{Raw: mustRaw(m), IP: strings.TrimSpace(m.IP), MAC: mac, CID: strings.TrimSpace(m.CID)}
 	}
 	return out
 }
@@ -441,6 +448,59 @@ func mustRaw(m memberDoc) json.RawMessage {
 		return nil
 	}
 	return raw
+}
+
+// HotspotClient is one WIRED client the hotspot database attributes to a
+// unit, ready to become an FDB entry on that unit's payload.
+type HotspotClient struct {
+	MAC       string // normalized uppercase
+	Port      string // display label of the physical port ("Port 4")
+	MemberCID string // mesh member cid when attached BEHIND it ("" = on the reporting unit itself)
+}
+
+// HotspotWiredClients extracts the wired clients from show/ip/hotspot.
+//
+// LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): the controller's hotspot DB
+// is the ONLY mesh-wide topology source — the units themselves 404 this
+// section, and no switch/bridge FDB path exists on 5.1 (show/switch,
+// show/switch/port, show/bridge all 404). Each host entry carries its
+// attachment:
+//   - top-level "port" ("1", "5"): wired to the reporting unit itself;
+//   - "mws": {cid, port, speed, duplex}: wired to the mesh member whose
+//     show/mws/member cid matches; the port is the physical port ON THAT
+//     MEMBER (the live mesh answers port "4" for a client wired to the
+//     Giga KN-1011 member, with that member's cid);
+//   - "mws": {cid, ap, ...}: wireless on that member — the association
+//     list already covers it, skipped here.
+//
+// Only "active" hosts are reported: the hotspot DB keeps dormant entries,
+// and an FDB entry is presence evidence, not history.
+func HotspotWiredClients(raw json.RawMessage) []HotspotClient {
+	var doc hotspotDoc
+	if len(raw) == 0 || json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	out := make([]HotspotClient, 0, len(doc.Host))
+	for _, h := range doc.Host {
+		if h.Active == nil || !*h.Active {
+			continue
+		}
+		mac := NormalizeMAC(h.MAC)
+		if mac == "" {
+			continue
+		}
+		switch {
+		case h.MWS.Port != "":
+			cid := strings.TrimSpace(h.MWS.CID)
+			if cid == "" {
+				continue // member-attached without an identity: cannot route it honestly
+			}
+			out = append(out, HotspotClient{MAC: mac, Port: "Port " + h.MWS.Port, MemberCID: cid})
+		case h.Port != "":
+			out = append(out, HotspotClient{MAC: mac, Port: "Port " + h.Port})
+		}
+	}
+	return out
 }
 
 // NormalizeMAC upper-cases and re-colons a vendor MAC. Keenetic reports MACs

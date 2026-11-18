@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.4 — 2026-11-18
+
+Topology: wired clients are attributed to the Keenetic unit they are
+physically plugged into.
+
+- The controller's hotspot DB (`show/ip/hotspot`) is the only mesh-wide
+  topology source on KeeneticOS 5.1: the units themselves 404 the section,
+  and no switch/bridge FDB path exists (`show/switch`, `show/switch/port`,
+  `show/bridge` all 404 — probed live on a Giga KN-1011).
+- Each hotspot host carries its attachment: a top-level `port` when wired to
+  the reporting unit, or an `mws` block (`cid`, `port`, `speed`) when wired
+  to a mesh member — the port is the PHYSICAL port on that member. The
+  fleet poller now turns these into the NetPulse FDB section per unit.
+- Without an FDB section the server attributed these clients to the
+  gateway's transit FDB (it sees every mesh client MAC on the port toward
+  the mesh): a client wired to an extender showed as a wired client of the
+  gateway. Per-unit FDB claims them first, so the map draws the right unit
+  and the right physical port.
+
 ## 0.1.3 — 2026-11-18
 
 Firmware honesty fix: no phantom update, no build hash as the version.

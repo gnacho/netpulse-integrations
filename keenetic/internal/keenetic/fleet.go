@@ -110,40 +110,38 @@ type UnitResult struct {
 // independently: one unreachable extender does not affect the others.
 func (f *Fleet) PollAll(ctx context.Context) []UnitResult {
 	results := make([]UnitResult, 0, len(f.units))
-	members := map[string]translate.MemberInfo{}
-	var hostAPI *keeneticapi.Client
-	{
-		api, err := f.poller.client(f.poller.cfg.Host)
-		if err != nil {
-			for _, u := range f.units {
-				results = append(results, UnitResult{Unit: u, Err: err})
-			}
-			return results
+	api, err := f.poller.client(f.poller.cfg.Host)
+	if err != nil {
+		for _, u := range f.units {
+			results = append(results, UnitResult{Unit: u, Err: err})
 		}
-		hostAPI = api
-		members, err = f.poller.fetchMembers(ctx, hostAPI)
-		if err != nil {
-			// Terminal (credential rejection): every unit fails this cycle
-			// with the same error, and Run stops.
-			for _, u := range f.units {
-				results = append(results, UnitResult{Unit: u, Err: err})
-			}
-			return results
-		}
+		return results
 	}
+	members, err := f.poller.fetchMembers(ctx, api)
+	if err != nil {
+		// Terminal (credential rejection): every unit fails this cycle
+		// with the same error, and Run stops.
+		for _, u := range f.units {
+			results = append(results, UnitResult{Unit: u, Err: err})
+		}
+		return results
+	}
+	// The controller's hotspot DB, read once per cycle: it is the source
+	// of the mesh-wide wired-client topology (per-unit FDB).
+	meshHotspot := f.poller.section(ctx, api, "show/ip/hotspot")
 	for _, u := range f.units {
-		api := hostAPI
+		unitAPI := api
 		if u.MAC != "" {
 			// The member is queried directly at its management address; the
 			// poller caches one client per address, so a member address
 			// change (DHCP lease renew) simply opens a fresh cache entry.
 			if info, ok := members[u.MAC]; ok && info.IP != "" {
 				if direct, err := f.poller.client(info.IP); err == nil {
-					api = direct
+					unitAPI = direct
 				}
 			}
 		}
-		data, err := f.poller.pollUnit(ctx, api, u.MAC, members)
+		data, err := f.poller.pollUnit(ctx, unitAPI, u.MAC, members, meshHotspot)
 		results = append(results, UnitResult{Unit: u, Data: data, Err: err})
 	}
 	return results

@@ -12,6 +12,30 @@ follows Keep a Changelog and semantic versioning.
   query in the journal, which made the remaining RouterOS failures impossible
   to diagnose from the pusher logs (#79).
 
+- Consume the rest of a binary API reply behind its terminal sentence. The
+  API specification makes `!done` the last reply of every sentence, and
+  RouterOS 7.24.6 (long-term, measured on a hAP ax3) honours it: a print
+  without rows answers `[!empty][!done]`, a missing legacy menu
+  `[!trap][!trap][!done]` and a denied `check-for-updates`
+  `[!trap category=9][!done]`. The client returned at the first `!empty` or
+  `!trap`, so every leftover sentence was read as the first sentence of the
+  next query and shifted every later reply by one: the client sections
+  polled first (DHCP, ARP, FDB, wireless) kept working while temperature,
+  CPU, firmware and the WAN rate, polled last, silently disappeared (#79).
+
+- Find the WAN egress when the compatibility route menu cannot give it.
+  `/ip/route` is the pre-7 menu: on some builds a read-only API user gets
+  it refused outright (category 9, "not enough permissions") even though
+  the CLI prints it, and on others its default-route row carries a bare
+  gateway address with no interface word. Both times the poller now falls
+  back to the native `/routing/route` menu, reads the egress interface from
+  `immediate-gw`/`gateway-status` ("<gateway>%<interface>"), and keeps the
+  poll alive when both menus are refused: such a box reports no rate, like
+  any other missing menu, instead of losing the clients.
+
+- Fail the poll on `!fatal` and on a trailing sentence cut mid-reply,
+  instead of reading the remainder as the next query's reply.
+
 ## [0.1.7] - 2026-11-16
 
 ### Fixed

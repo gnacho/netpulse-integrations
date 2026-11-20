@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Degrade a member entry to the controller's facts when the member's own RCI
+  does not answer (network failure): the member report's health, firmware and
+  backhaul still report, the wired-client FDB from the controller's hotspot
+  DB keeps updating, and the controller identity is never substituted for the
+  member's. A credential rejection mid-cycle (401 even after a fresh
+  handshake) now fails the unit terminally instead of reporting a half-alive
+  poll.
 - The shared integrations supervisor accepts `"type": "keenetic"` entries (one
   per unit; a mesh member adds `mac`), completing the supervisor deployment
   shape documented in the README.

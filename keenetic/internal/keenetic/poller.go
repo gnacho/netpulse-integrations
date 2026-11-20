@@ -162,7 +162,11 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	// DB (the only mesh-wide source; the member itself 404s the section).
 	var meshHotspot json.RawMessage
 	if p.cfg.UnitMAC != "" {
-		meshHotspot = p.section(ctx, api, "show/ip/hotspot")
+		raw, err := p.meshHotspotDB(ctx, api)
+		if err != nil {
+			return nil, err
+		}
+		meshHotspot = raw
 	}
 	return p.pollUnit(ctx, api, p.cfg.UnitMAC, members, meshHotspot)
 }
@@ -175,45 +179,117 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 // fleet cycle; it is the source of the member's wired-client FDB.
 func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo, meshHotspot json.RawMessage) (*probe.PayloadData, error) {
 	var member json.RawMessage
+	var memberIP string
 	if unitMAC != "" {
 		info, ok := members[unitMAC]
 		if !ok {
 			return nil, &memberError{mac: unitMAC}
 		}
 		member = info.Raw
+		memberIP = info.IP
 		// PROVISIONAL (integration issue #1, plan §4 Q1/Q6): a member is
 		// queried directly at its management address so the association list
 		// is the member's own. Live-confirmed on KeeneticOS 5.1.8: an
 		// extender answers version/system/associations/arp/interface and
 		// 404s hotspot and mws/member (controller-only sections).
-		if info.IP != "" {
-			if direct, err := p.client(info.IP); err == nil {
-				api = direct
+	}
+
+	// Identity sections: a poll without these carries no honest data. A
+	// member whose own RCI does not answer (network failure — a credential
+	// rejection stays terminal) degrades to the facts the controller
+	// already knows: the member report (health, firmware, backhaul) plus
+	// the controller's hotspot DB for the wired-client FDB. The member's
+	// own sections stay absent this cycle and NetPulse keeps their last
+	// good values. The controller identity is NEVER substituted for a
+	// member's: those facts belong to the wrong unit.
+	var degraded bool
+	var version, systemRaw json.RawMessage
+	var memberAPI *keeneticapi.Client // the member's own RCI (nil = unreachable)
+	if unitMAC == "" {
+		// The unit the host points at: the controller client IS the unit.
+		var err error
+		if version, err = api.Get(ctx, "show/version"); err != nil {
+			return nil, fmt.Errorf("show/version: %w", err)
+		}
+		if systemRaw, err = api.Get(ctx, "show/system"); err != nil {
+			return nil, fmt.Errorf("show/system: %w", err)
+		}
+	} else {
+		if memberIP != "" {
+			memberAPI, _ = p.client(memberIP) // invalid member address = unreachable member
+		}
+		if memberAPI == nil {
+			degraded = true
+		} else {
+			var err error
+			if version, err = memberAPI.Get(ctx, "show/version"); err != nil {
+				if isAuth(err) {
+					return nil, fmt.Errorf("member show/version: %w", err)
+				}
+				degraded = true
 			}
+			if !degraded {
+				if systemRaw, err = memberAPI.Get(ctx, "show/system"); err != nil {
+					if isAuth(err) {
+						return nil, fmt.Errorf("member show/system: %w", err)
+					}
+					degraded = true
+				}
+			}
+		}
+		if degraded {
+			slog.Info("keenetic: member unreachable, degrading to the controller's facts",
+				"unit", unitMAC, "member_addr", memberIP)
 		}
 	}
 
-	// Identity sections: a poll without these carries no honest data.
-	version, err := api.Get(ctx, "show/version")
-	if err != nil {
-		return nil, fmt.Errorf("show/version: %w", err)
+	// Optional sections: a 404 (not on this firmware) or a transient failure
+	// keeps the section absent — NetPulse holds the last good value — while a
+	// credential rejection stops the unit instead of reporting a half-alive
+	// poll with revoked credentials.
+	var assoc, hotspot, lease, arp, ifaces, internet json.RawMessage
+	var authFailure error
+	if !degraded {
+		// The member sections go to the member's own RCI; the controller's
+		// client only answers for the unit it points at.
+		sectionsAPI := api
+		if unitMAC != "" {
+			sectionsAPI = memberAPI
+		}
+		optional := func(dst *json.RawMessage, path string) {
+			raw, err := sectionsAPI.Get(ctx, path)
+			if err == nil {
+				*dst = raw
+				return
+			}
+			if isAuth(err) {
+				authFailure = err
+				return
+			}
+			if !isNotFound(err) {
+				slog.Debug("keenetic: section unavailable", "path", path, "err", err)
+			}
+		}
+		optional(&assoc, "show/associations")
+		optional(&hotspot, "show/ip/hotspot")
+		var leaseErr error
+		lease, _, leaseErr = sectionsAPI.TryGet(ctx, "show/ip/dhcp/lease", "show/ip/dhcp/leases", "show/ip/dhcp/bindings")
+		if leaseErr != nil {
+			if isAuth(leaseErr) {
+				authFailure = leaseErr
+			}
+			lease = nil
+		}
+		optional(&arp, "show/ip/arp")
+		optional(&ifaces, "show/interface")
+		if unitMAC == "" {
+			// Only the unit the host points at reports a WAN: a mesh member has
+			// no uplink of its own, and its internet check travels the mesh.
+			optional(&internet, "show/internet/status")
+		}
 	}
-	systemRaw, err := api.Get(ctx, "show/system")
-	if err != nil {
-		return nil, fmt.Errorf("show/system: %w", err)
-	}
-
-	assoc := p.section(ctx, api, "show/associations")
-	hotspot := p.section(ctx, api, "show/ip/hotspot")
-	lease, _, _ := api.TryGet(ctx, "show/ip/dhcp/lease", "show/ip/dhcp/leases", "show/ip/dhcp/bindings")
-	arp := p.section(ctx, api, "show/ip/arp")
-	ifaces := p.section(ctx, api, "show/interface")
-
-	var internet json.RawMessage
-	if unitMAC == "" {
-		// Only the unit the host points at reports a WAN: a mesh member has
-		// no uplink of its own, and its internet check travels the mesh.
-		internet = p.section(ctx, api, "show/internet/status")
+	if authFailure != nil {
+		return nil, authFailure
 	}
 
 	sec := translate.Section{
@@ -387,15 +463,23 @@ func (p *Poller) fdbFor(unitMAC string, ownHotspot, meshHotspot json.RawMessage,
 	return out
 }
 
-// section queries one optional section; any failure (404 on this firmware,
-// transient error) yields nil, which the payload treats as "no fresh data,
-// keep the previous". Non-404 failures are logged at debug level.
-func (p *Poller) section(ctx context.Context, api *keeneticapi.Client, path string) json.RawMessage {
-	raw, err := api.Get(ctx, path)
-	if err != nil && !isNotFound(err) {
-		slog.Debug("keenetic: section unavailable", "path", path, "err", err)
+// meshHotspotDB fetches the mesh-wide hotspot DB. A 404 (unit without the
+// section) and a transient failure yield a nil section — the FDB keeps its
+// last good value — while a credential rejection is returned as a terminal
+// error for the cycle.
+func (p *Poller) meshHotspotDB(ctx context.Context, api *keeneticapi.Client) (json.RawMessage, error) {
+	raw, err := api.Get(ctx, "show/ip/hotspot")
+	switch {
+	case err == nil:
+		return raw, nil
+	case isAuth(err):
+		return nil, err
+	case isNotFound(err):
+		return nil, nil
+	default:
+		slog.Debug("keenetic: section unavailable", "path", "show/ip/hotspot", "err", err)
+		return nil, nil
 	}
-	return raw
 }
 
 // rates computes system rxBps/txBps from the delta of the traffic interface
@@ -438,4 +522,12 @@ func round0(v float64) float64 {
 func isNotFound(err error) bool {
 	var nf *keeneticapi.NotFoundError
 	return errors.As(err, &nf)
+}
+
+// isAuth reports a credential rejection, which is terminal for the unit:
+// reporting a half-alive poll with revoked credentials would be a lie, and
+// retrying hammers the router's brute-force protection.
+func isAuth(err error) bool {
+	var auth *keeneticapi.AuthError
+	return errors.As(err, &auth)
 }

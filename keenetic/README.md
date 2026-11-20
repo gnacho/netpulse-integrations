@@ -110,7 +110,10 @@ are visible in the controller's web UI (Wi-Fi System page) or via
   MAC. The extender is polled directly at the address the controller
   reports; when that address is unreachable the entry degrades to the facts
   the controller knows (health, firmware, backhaul) and keeps its clients
-  empty until the member answers again.
+  empty until the member answers again — the wired-client FDB from the
+  controller's hotspot DB still updates, so the map keeps the unit and its
+  ports in place during the outage. A credential rejection (401 even after
+  a fresh handshake) is terminal for the unit.
 
 ## Create a read-only account
 

@@ -186,7 +186,11 @@ func (c *Client) Get(ctx context.Context, path string) (json.RawMessage, error) 
 	}
 	body, err = c.get(ctx, path)
 	if errors.Is(err, errNeedAuth) {
-		return nil, fmt.Errorf("GET /rci/%s: session rejected after re-authentication", path)
+		// The router keeps rejecting the session even after a fresh
+		// handshake: the credentials (or the unit's auth state) are broken,
+		// not merely expired. Terminal — the same rule a rejected handshake
+		// follows.
+		return nil, &AuthError{Detail: fmt.Sprintf("GET /rci/%s: session rejected after re-authentication", path)}
 	}
 	return body, err
 }

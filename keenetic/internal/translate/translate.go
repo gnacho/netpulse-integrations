@@ -96,6 +96,7 @@ type memberDoc struct {
 	KnownHost   string `json:"known-host"`
 	IP          string `json:"ip"`
 	Mode        string `json:"mode"` // "extender" | "router" (live fixture)
+	HWID        string `json:"hw_id"`
 	FW          string `json:"fw"`
 	FWAvailable string `json:"fw-available"`
 	System      *struct {
@@ -193,21 +194,32 @@ type ifacesDoc map[string]ifaceDoc
 // ("5.01.C.8.0-2") is a channel designation that does not compare as a
 // version, so it is the LAST fallback.
 func Board(raw json.RawMessage, member json.RawMessage) *probe.BoardInfo {
-	if len(raw) == 0 {
-		return nil
-	}
+	// A degraded member entry (its own RCI unreachable) has no show/version
+	// answer: the member report alone still names the model and the firmware
+	// honestly.
 	var v versionDoc
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil
+	if len(raw) > 0 && json.Unmarshal(raw, &v) != nil {
+		v = versionDoc{}
+	}
+	var mem memberDoc
+	if len(member) > 0 && json.Unmarshal(member, &mem) != nil {
+		mem = memberDoc{}
 	}
 	model := v.Model
 	if model == "" {
 		model = v.Title
 	}
-	if model == "" && v.HWID == "" {
+	if model == "" {
+		model = mem.Model
+	}
+	hwid := v.HWID
+	if hwid == "" {
+		hwid = mem.HWID
+	}
+	if model == "" && hwid == "" {
 		return nil
 	}
-	b := &probe.BoardInfo{Model: model, BoardName: v.HWID}
+	b := &probe.BoardInfo{Model: model, BoardName: hwid}
 	b.Release.Version = v.NDM.Version
 	if b.Release.Version == "" {
 		b.Release.Version = memberFW(member)

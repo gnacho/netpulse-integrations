@@ -3,13 +3,17 @@ package keenetic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
 )
 
 // fakeRCI serves the redacted live fixtures as a KeeneticOS RCI would: the
@@ -28,6 +32,10 @@ type fakeRCI struct {
 	authPOST int
 	// rejectAuth forces every POST /auth to answer 401 (terminal-error test).
 	rejectAuth bool
+	// deny forces /rci/<path> to answer 401 even with a valid session: a
+	// credential revoked mid-cycle (the client's transparent re-auth then
+	// still fails, which is the AuthError the poller must not swallow).
+	deny map[string]bool
 	// valid is the cookie name whose POST /auth SUCCEEDED: the real router
 	// activates the session only then — the cookie issued at GET /auth does
 	// not authenticate /rci by itself.
@@ -105,6 +113,10 @@ func newFakeRCI(t *testing.T, fixtureDir string, extender bool) *fakeRCI {
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/rci/")
 		f.calls[path]++
+		if f.deny[path] {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		body, ok := f.paths[path]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -287,6 +299,96 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 	}
 	if len(data.FDB.MACs) != 1 {
 		t.Fatalf("member fdb = %+v, want exactly the one wired client", data.FDB.MACs)
+	}
+}
+
+// TestPollMemberDegradedToControllerFacts pins the documented degradation: a
+// member whose own RCI does not answer still reports what the controller
+// knows — the member report's health, firmware and backhaul, plus the
+// wired-client FDB from the controller's hotspot DB — while the controller's
+// identity is never substituted for the member's.
+func TestPollMemberDegradedToControllerFacts(t *testing.T) {
+	controller := newFakeRCI(t, fixtureDir(t), false)
+
+	// A member address that refuses connections: open a listener and close
+	// it again, then point the mesh report at it.
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadHost := dead.Addr().String()
+	dead.Close()
+
+	memberJSON, _ := os.ReadFile(filepath.Join(fixtureDir(t), "mws_member_mesh.json"))
+	var list []map[string]any
+	if err := json.Unmarshal(memberJSON, &list); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	list[0]["ip"] = deadHost
+	list[0]["fw-available"] = "5.2.0"
+	rewritten, _ := json.Marshal(list)
+	controller.paths["show/mws/member"] = string(rewritten)
+
+	p, err := New(Config{Host: controller.server.URL, User: "viewer", Password: "x", UnitMAC: "02:AD:EF:c1:80:8a"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("an unreachable member must degrade, not fail the unit: %v", err)
+	}
+	// Identity comes from the member report, never from the controller's
+	// show/version (that is the controller's board under the member's slug).
+	if data.System == nil {
+		t.Fatal("degraded payload must still carry system data")
+	}
+	if data.System.CPU == nil || *data.System.CPU != 1 {
+		t.Fatalf("cpu = %+v, want the member report's cpuload 1", data.System.CPU)
+	}
+	if data.System.Board == nil || data.System.Board.Release.Version != "5.1.8" {
+		t.Fatalf("firmware = %+v, want the member report's fw", data.System.Board)
+	}
+	if data.System.FirmwareAvailable != "5.2.0" {
+		t.Fatalf("fw-available = %q, want 5.2.0 from the member report", data.System.FirmwareAvailable)
+	}
+	if data.System.Backhaul != "wifi" {
+		t.Fatalf("backhaul = %q, want wifi from the member report", data.System.Backhaul)
+	}
+	if data.System.BridgeMAC != "02:AD:EF:C1:80:8A" {
+		t.Fatalf("bridgeMAC = %q, want the member base MAC", data.System.BridgeMAC)
+	}
+	// The member's own sections are absent (the server keeps the last good
+	// values): no wireless clients, no WAN.
+	if data.Wireless != nil && len(data.Wireless.Clients) > 0 {
+		t.Fatalf("clients = %+v, want none without the member's associations", data.Wireless.Clients)
+	}
+	if data.Wan != nil {
+		t.Fatalf("wan = %+v, want nil on a degraded member", data.Wan)
+	}
+	// Topology survives the outage: the member's wired clients come from the
+	// controller's hotspot DB, which still answered.
+	if data.FDB == nil || data.FDB.MACs == nil {
+		t.Fatal("degraded payload must keep the hotspot-derived FDB")
+	}
+	if got := data.FDB.MACs["0E:00:00:AA:BB:CC"]; got != "Port 4" {
+		t.Fatalf("degraded fdb[wired client] = %q, want Port 4", got)
+	}
+}
+
+// TestPollSectionAuthIsTerminal pins the auth propagation: a credential
+// revoked mid-cycle must fail the unit (terminal), not report a half-alive
+// poll with the remaining sections.
+func TestPollSectionAuthIsTerminal(t *testing.T) {
+	f := newFakeRCI(t, fixtureDir(t), false)
+	f.deny = map[string]bool{"show/associations": true}
+	p, err := New(Config{Host: f.server.URL, User: "viewer", Password: "x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = p.Poll(context.Background())
+	var auth *keeneticapi.AuthError
+	if !errors.As(err, &auth) {
+		t.Fatalf("Poll error = %v, want AuthError", err)
 	}
 }
 

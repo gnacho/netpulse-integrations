@@ -46,6 +46,7 @@ func runFleet(ctx context.Context, configPath string) error {
 		Password:    cfg.Password,
 		Timeout:     cfg.Timeout,
 		InsecureTLS: cfg.InsecureTLS,
+		CertFP:      cfg.CertFP,
 	}, cfg.Units)
 	if err != nil {
 		return err
@@ -94,6 +95,7 @@ func runSingle(ctx context.Context) error {
 		Password:    password,
 		UnitMAC:     strings.TrimSpace(os.Getenv("KEENETIC_UNIT_MAC")),
 		InsecureTLS: os.Getenv("KEENETIC_INSECURE_TLS") == "1",
+		CertFP:      strings.TrimSpace(os.Getenv("KEENETIC_CERT_FP")),
 	})
 	if err != nil {
 		return err

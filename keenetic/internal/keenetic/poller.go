@@ -27,6 +27,7 @@ import (
 
 	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
 	"github.com/gnacho/netpulse-integrations/keenetic/internal/translate"
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -51,6 +52,8 @@ type Config struct {
 	Timeout time.Duration
 	// InsecureTLS accepts the unit self-signed certificate.
 	InsecureTLS bool
+	// CertFP pins the unit certificate by SPKI (https:// targets).
+	CertFP string
 }
 
 // rateSample is the previous traffic sample of ONE unit (cumulative interface
@@ -83,6 +86,12 @@ func New(cfg Config) (*Poller, error) {
 		// the same form.
 		cfg.UnitMAC = normalized
 	}
+	if strings.TrimSpace(cfg.CertFP) != "" {
+		// Fail a bad pin at configuration time, not on the first handshake.
+		if _, err := tlspin.Parse(cfg.CertFP); err != nil {
+			return nil, fmt.Errorf("cert_fp: %w", err)
+		}
+	}
 	return &Poller{
 		cfg:     cfg,
 		samples: map[string]*rateSample{},
@@ -111,6 +120,7 @@ func (p *Poller) client(host string) (*keeneticapi.Client, error) {
 		Password:    p.cfg.Password,
 		Timeout:     p.cfg.Timeout,
 		InsecureTLS: p.cfg.InsecureTLS,
+		CertFP:      p.cfg.CertFP,
 	})
 	if err != nil {
 		return nil, err

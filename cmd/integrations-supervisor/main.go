@@ -48,7 +48,8 @@ type integration struct {
 	Site         string `json:"site,omitempty"`
 	WANInterface string `json:"wan_interface,omitempty"`
 	// APITLS is RouterOS-only. CACert and CertFP authenticate RouterOS
-	// and OPNsense certificates. Other vendors ignore them.
+	// and OPNsense certificates; CertFP also pins the Keenetic unit
+	// certificate (SPKI). Other vendors ignore them.
 	APITLS bool   `json:"api_tls,omitempty"`
 	CACert string `json:"ca_cert,omitempty"`
 	CertFP string `json:"cert_fp,omitempty"`
@@ -188,6 +189,7 @@ func buildPollers(entries []integration, defaultVersion string, logger *slog.Log
 				Password:    entry.Password,
 				UnitMAC:     entry.MAC,
 				InsecureTLS: entry.Insecure,
+				CertFP:      entry.CertFP,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("integration %d (keenetic): %w", i, err)

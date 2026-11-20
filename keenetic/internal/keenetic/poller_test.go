@@ -463,3 +463,10 @@ func TestNewRejectsBadUnitMAC(t *testing.T) {
 		t.Fatal("a non-MAC unit selector must be rejected")
 	}
 }
+
+func TestNewRejectsBadCertFP(t *testing.T) {
+	// The pin must fail at configuration time, not on the first handshake.
+	if _, err := New(Config{Host: "http://x", User: "u", Password: "p", CertFP: "nothexpin"}); err == nil {
+		t.Fatal("a malformed cert_fp must be rejected")
+	}
+}

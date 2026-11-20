@@ -2,6 +2,8 @@ package keeneticapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -250,5 +252,49 @@ func TestAuthKeyScheme(t *testing.T) {
 	const want = "d183fda958d703e1f309c86b488fb64d09b0992f173ec9dc5f9db8f3c0617fc4"
 	if got != want {
 		t.Fatalf("authKey = %s, want %s", got, want)
+	}
+}
+
+func TestCertFPPinsTheUnitCertificate(t *testing.T) {
+	// A TLS unit whose certificate nobody trusts: the pin must be the only
+	// way in, and a wrong pin must fail the handshake.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			name := "sess-pin"
+			w.Header().Set("X-NDM-Realm", "Keenetic Test")
+			w.Header().Set("X-NDM-Challenge", "0123456789abcdef0123456789abcdef")
+			http.SetCookie(w, &http.Cookie{Name: name, Value: "sid", HttpOnly: true})
+			w.WriteHeader(http.StatusUnauthorized)
+		case http.MethodPost:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		}
+	})
+	mux.HandleFunc("/rci/show/version", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"title":"5.1","model":"Ultra (KN-1811)"}`))
+	})
+	srv := httptest.NewTLSServer(mux)
+	t.Cleanup(srv.Close)
+
+	sum := sha256.Sum256(srv.Certificate().RawSubjectPublicKeyInfo)
+	pin := hex.EncodeToString(sum[:])
+
+	c, err := New(Config{Host: srv.URL, User: "u", Password: "p", CertFP: "sha256/" + pin})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Get(context.Background(), "show/version"); err != nil {
+		t.Fatalf("pinned client rejected: %v", err)
+	}
+
+	bad, err := New(Config{Host: srv.URL, User: "u", Password: "p", CertFP: strings.Repeat("ab", 32)})
+	if err != nil {
+		t.Fatalf("New (wrong pin): %v", err)
+	}
+	if _, err := bad.Get(context.Background(), "show/version"); err == nil || !strings.Contains(err.Error(), "SPKI") {
+		t.Fatalf("wrong pin error = %v, want SPKI mismatch", err)
 	}
 }

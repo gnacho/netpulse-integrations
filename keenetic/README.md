@@ -54,7 +54,9 @@ a JSON file (chmod 600 — it carries the tokens and the account password):
 
 Run it with `KEENETIC_CONFIG=/path/to/config.json`. Optional keys:
 `ca_file` / `server_fp` (HTTPS to NetPulse, never both), `timeout`
-(per-request, default 10s), `insecure_tls` (unit self-signed certificate).
+(per-request, default 10s), `insecure_tls` (unit self-signed certificate) or
+`cert_fp` (SHA-256 SPKI pin of the unit certificate — the stronger trust;
+mutually exclusive with `insecure_tls`, applies to every unit in the fleet).
 
 Sessions are reused: the poller keeps one authenticated client per router
 address for its lifetime, and the KeeneticOS session (a 300-second sliding
@@ -83,6 +85,7 @@ Standalone binary environment:
 | `KEENETIC_PASS` | That account's password. Required. |
 | `KEENETIC_UNIT_MAC` | Base MAC of the mesh member this entry reports (any case). Empty = the unit `KEENETIC_HOST` points at. |
 | `KEENETIC_INSECURE_TLS` | `1` accepts the unit self-signed certificate on `https://` targets. |
+| `KEENETIC_CERT_FP` | Comma-separated SHA-256 SPKI pins of the unit certificate (`https://` targets); the stronger trust, mutually exclusive with `KEENETIC_INSECURE_TLS`. |
 
 Supervisor JSON entry (one entry per unit; the same `KEENETIC_*` fields as
 config):
@@ -101,7 +104,9 @@ config):
 
 A mesh member entry adds `"mac": "<base MAC from show/mws/member>"`. MACs
 are visible in the controller's web UI (Wi-Fi System page) or via
-`GET /rci/show/mws/member`.
+`GET /rci/show/mws/member`. On an `https://` unit the entry can pin its
+certificate with `"cert_fp": "<sha256 SPKI>"` (the same key the fleet
+config takes).
 
 ### Choosing slugs and units
 

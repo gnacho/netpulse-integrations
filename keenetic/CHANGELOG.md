@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Pin the unit certificate by SPKI: `cert_fp` (supervisor entry and fleet
+  config), `KEENETIC_CERT_FP` (single-unit env). A pinned handshake accepts
+  only the configured key; a bad pin fails at configuration time. Mutually
+  exclusive with `insecure_tls`.
 - Degrade a member entry to the controller's facts when the member's own RCI
   does not answer (network failure): the member report's health, firmware and
   backhaul still report, the wired-client FDB from the controller's hotspot

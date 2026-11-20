@@ -44,6 +44,11 @@ type FleetConfig struct {
 	CAFile   string `json:"ca_file,omitempty"`
 	ServerFP string `json:"server_fp,omitempty"`
 
+	// Trust of the router's own certificate (https:// units): an SPKI pin
+	// of the unit certificate. InsecureTLS is the explicit opt-out; setting
+	// both is a configuration error.
+	CertFP string `json:"cert_fp,omitempty"`
+
 	Units []Unit `json:"units"`
 
 	// parsed
@@ -114,6 +119,9 @@ func (c *FleetConfig) validate() error {
 		interval = d
 	}
 	c.Interval = interval
+	if c.CertFP != "" && c.InsecureTLS {
+		return errFleet("cert_fp and insecure_tls are mutually exclusive: pick one way to trust the unit certificate")
+	}
 	if c.TimeoutRaw != "" {
 		d, err := time.ParseDuration(c.TimeoutRaw)
 		if err != nil || d <= 0 {

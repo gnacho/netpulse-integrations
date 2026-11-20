@@ -259,6 +259,7 @@ func TestLoadFleetConfig(t *testing.T) {
 		`{"server":"http://x","host":"h","user":"u","password":"p","units":[{"slug":"a","token":"t","mac":"zz"}]}`,
 		`{"server":"http://x","host":"h","user":"u","password":"p","units":[{"slug":"a","token":"t"},{"slug":"a","token":"t2"}]}`,
 		`{"server":"http://x","host":"h","user":"u","password":"p","interval":"nope","units":[{"slug":"a","token":"t"}]}`,
+		`{"server":"http://x","host":"h","user":"u","password":"p","cert_fp":"` + strings.Repeat("ab", 32) + `","insecure_tls":true,"units":[{"slug":"a","token":"t"}]}`,
 	}
 	for i, body := range bad {
 		p := filepath.Join(dir, "bad.json")

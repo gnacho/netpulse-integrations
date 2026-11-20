@@ -47,6 +47,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 )
 
 // Config is the address and credentials of one KeeneticOS unit.
@@ -62,7 +64,13 @@ type Config struct {
 	Timeout time.Duration
 	// InsecureTLS accepts the unit self-signed certificate on https://
 	// targets. Never set for plain HTTP targets; it has no effect there.
+	// Mutually exclusive with CertFP: a pin is the stronger trust.
 	InsecureTLS bool
+	// CertFP is a comma-separated list of SHA-256 SPKI pins of the unit
+	// certificate (https:// targets): the handshake must present a key
+	// matching one of them. The pin is validated at configuration time, so
+	// a typo fails before the first request instead of mid-cycle.
+	CertFP string
 }
 
 // AuthError reports that the router rejected the credentials. It is terminal:
@@ -157,10 +165,27 @@ func New(cfg Config) (*Client, error) {
 		timeout = 10 * time.Second
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if u.Scheme == "https" && cfg.InsecureTLS {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // documented option for the unit self-signed certificate
-			MinVersion:         tls.VersionTLS12,
+	if u.Scheme == "https" {
+		switch {
+		case strings.TrimSpace(cfg.CertFP) != "":
+			// Deliberate pinning: skip the system trust and verify the
+			// handshake against the configured SPKI pins instead.
+			pins, err := tlspin.Parse(cfg.CertFP)
+			if err != nil {
+				return nil, fmt.Errorf("keenetic cert_fp: %w", err)
+			}
+			transport.TLSClientConfig = &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // deliberate SPKI pinning below
+				VerifyConnection: func(cs tls.ConnectionState) error {
+					return tlspin.Verify(cs.PeerCertificates, pins)
+				},
+				MinVersion: tls.VersionTLS12,
+			}
+		case cfg.InsecureTLS:
+			transport.TLSClientConfig = &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec // documented option for the unit self-signed certificate
+				MinVersion:         tls.VersionTLS12,
+			}
 		}
 	}
 	return &Client{

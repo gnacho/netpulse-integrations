@@ -34,7 +34,7 @@
       "tagPrefix": "keenetic/v",
       "binary": "keenetic-pusher",
       "target": "keenetic/cmd/keenetic-pusher",
-      "description": "Read-only KeeneticOS pusher covering a whole mesh: system and interface state, wired clients from the hotspot FDB, wireless clients, the mesh tree from member backhaul reports, ARP/DHCP identities, temperatures and firmware state"
+      "description": "Read-only KeeneticOS pusher covering a whole mesh: system and interface state, wired clients from the hotspot FDB, wireless clients, the mesh tree from member backhaul reports, ARP/DHCP identities and firmware state"
     },
     {
       "id": "opnsense",

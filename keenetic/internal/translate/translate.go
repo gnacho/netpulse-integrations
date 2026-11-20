@@ -1037,12 +1037,19 @@ func PickTrafficIface(wanIface string, raw json.RawMessage) string {
 func BridgeMAC(raw json.RawMessage, member json.RawMessage) string {
 	var doc ifacesDoc
 	if len(raw) > 0 && json.Unmarshal(raw, &doc) == nil {
-		for _, f := range doc {
-			if f.Type == "Bridge" && f.MAC != "" {
-				if mac := NormalizeMAC(f.MAC); mac != "" {
-					return mac
-				}
+		// Deterministic pick: a unit can carry more than one bridge (a guest
+		// bridge) and a bare map walk would switch the unit identity — and
+		// with it the backhaul parent match — between pushes. The lowest
+		// bridge id wins, the same rule PickTrafficIface applies.
+		ids := make([]string, 0, 2)
+		for id, f := range doc {
+			if f.Type == "Bridge" && f.MAC != "" && NormalizeMAC(f.MAC) != "" {
+				ids = append(ids, id)
 			}
+		}
+		sort.Strings(ids)
+		if len(ids) > 0 {
+			return NormalizeMAC(doc[ids[0]].MAC)
 		}
 	}
 	var mem memberDoc

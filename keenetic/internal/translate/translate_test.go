@@ -320,6 +320,24 @@ func TestWirelessUnknownAPKeepsEmptyBand(t *testing.T) {
 	}
 }
 
+func TestBridgeMACPicksTheLowestBridgeID(t *testing.T) {
+	// Two bridges (a guest bridge): a bare map walk would switch the unit
+	// identity — and with it the backhaul parent match — between pushes.
+	// The lowest bridge id must win on every map iteration order.
+	const doc = `{"Bridge1":{"type":"Bridge","mac":"02:AD:EF:99:99:99"},"Bridge0":{"type":"Bridge","mac":"02:ad:ef:ae:80:f2"},"WifiMaster0":{"type":"WifiMaster"}}`
+	ifaces := json.RawMessage(doc)
+	for i := 0; i < 50; i++ {
+		if got := BridgeMAC(ifaces, nil); got != "02:AD:EF:AE:80:F2" {
+			t.Fatalf("bridgeMAC = %q at iteration %d, want the Bridge0 MAC", got, i)
+		}
+	}
+	// A bridge whose MAC does not normalize is skipped, not fatal.
+	const badMAC = `{"Bridge0":{"type":"Bridge","mac":"nope"},"Bridge1":{"type":"Bridge","mac":"02:AD:EF:99:99:99"}}`
+	if got := BridgeMAC(json.RawMessage(badMAC), nil); got != "02:AD:EF:99:99:99" {
+		t.Fatalf("bridgeMAC with an invalid first MAC = %q, want the valid bridge", got)
+	}
+}
+
 func TestRadiosFromInterfacesLive(t *testing.T) {
 	radios := RadiosFromInterfaces(fixture(t, "interface_5_1.json"))
 	if len(radios) != 2 {

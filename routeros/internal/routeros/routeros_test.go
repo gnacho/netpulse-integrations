@@ -1246,17 +1246,57 @@ func sawCommand(recorded [][]string, cmd string) bool {
 // growingInterfacePrint answers /interface/print with counters that grow
 // with every poll, so the WAN rate has a nonzero delta on the second one.
 func growingInterfacePrint(replies map[string][][]byte, polls *int) func(cmd string) [][]byte {
+	return growingInterfacePrintOn(replies, polls, "ether1")
+}
+
+// growingInterfacePrintOn is growingInterfacePrint for a named interface, so a
+// test can measure the rate on the one a route row actually names.
+func growingInterfacePrintOn(replies map[string][][]byte, polls *int, iface string) func(cmd string) [][]byte {
 	return func(cmd string) [][]byte {
 		if cmd == "/interface/print" {
 			*polls++
 			return [][]byte{
-				testSentence("!re", "=name=ether1", "=type=ether", "=running=true",
+				testSentence("!re", "=name="+iface, "=type=ether", "=running=true",
 					"=mac-address=aa:bb:cc:dd:ee:01",
 					"=rx-byte="+strconv.Itoa(1000+100**polls), "=tx-byte="+strconv.Itoa(2000+50**polls)),
 				testSentence("!done"),
 			}
 		}
 		return replies[cmd]
+	}
+}
+
+// A RouterOS 7.25 default route keeps the ISP next hop as gateway and carries
+// the egress inside immediate-gw, which is the shape a read-only API user
+// prints. The rate must be measured on that interface without asking the
+// native menu, which is only the fallback for a row with no egress at all
+// (#85).
+func TestPollAPIRouteIPGatewayCarriesImmediateGW(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/ip/route/print"] = [][]byte{
+		testSentence("!re", "=.id=*1", "=dst-address=0.0.0.0/0", "=routing-table=main",
+			"=gateway=192.0.2.1", "=immediate-gw=192.0.2.1%sfp1-wan", "=vrf-interface=sfp1-wan"),
+		testSentence("!done"),
+	}
+	polls := 0
+	poller, f := fakeAPIPoller(t, growingInterfacePrintOn(replies, &polls, "sfp1-wan"), 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if data.System.RxBps != nil || data.System.TxBps != nil {
+		t.Fatalf("rates on the first poll = %+v, want none (baseline only)", data.System)
+	}
+	data, err = poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if data.System.RxBps == nil || data.System.TxBps == nil {
+		t.Fatalf("rates = %+v, want the sfp1-wan deltas of the compatibility row", data.System)
+	}
+	if sawCommand(f.recorded(), "/routing/route/print") {
+		t.Fatal("a row that already carries the egress must not trigger the native query")
 	}
 }
 
@@ -1416,6 +1456,9 @@ func TestRouterOSWANInterfaceEgressForms(t *testing.T) {
 			{"dst-address": "192.168.1.0/24", "interface": "bridge"}}, ""},
 		{"native immediate-gw egress", []map[string]string{
 			{"dst-address": "0.0.0.0/0", "immediate-gw": "207.188.168.1%pepephone"}}, "pepephone"},
+		{"compat gateway address plus immediate-gw egress", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway": "192.0.2.1",
+				"immediate-gw": "192.0.2.1%sfp1-wan"}}, "sfp1-wan"},
 		{"native immediate-gw bare interface", []map[string]string{
 			{"dst-address": "0.0.0.0/0", "immediate-gw": "bridge"}}, "bridge"},
 		{"native immediate-gw bare address names nothing", []map[string]string{

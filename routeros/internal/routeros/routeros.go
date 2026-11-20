@@ -281,12 +281,17 @@ func trustErrorf(format string, args ...any) *TrustError {
 type TrapError struct {
 	message     string
 	menuMissing bool
+	category    int
 }
 
 func (e *TrapError) Error() string { return e.message }
 
-func trapErrorf(menuMissing bool, format string, args ...any) *TrapError {
-	return &TrapError{message: fmt.Sprintf(format, args...), menuMissing: menuMissing}
+func trapErrorf(menuMissing bool, category int, format string, args ...any) *TrapError {
+	return &TrapError{
+		message:     fmt.Sprintf(format, args...),
+		menuMissing: menuMissing,
+		category:    category,
+	}
 }
 
 // isMenuMissing reports a refusal to talk about a menu the device does not
@@ -294,6 +299,22 @@ func trapErrorf(menuMissing bool, format string, args ...any) *TrapError {
 func isMenuMissing(err error) bool {
 	var trap *TrapError
 	return errors.As(err, &trap) && trap.menuMissing
+}
+
+// isPermissionDenied reports a !trap refusal about permissions. Some builds
+// answer a read-only API user this way for a menu the same user can still
+// print from the CLI. RouterOS reports it as category 9 ("not enough
+// permissions") although the published category list stops at 7, so the
+// category is trusted first and the message phrase stays as a fallback for
+// traps that carry no category. Like a missing menu it is not a poll
+// failure: the caller leaves the affected section empty instead of dropping
+// the whole poll.
+func isPermissionDenied(err error) bool {
+	var trap *TrapError
+	if !errors.As(err, &trap) {
+		return false
+	}
+	return trap.category == 9 || strings.Contains(trap.message, "permission")
 }
 
 // menuMissingReply classifies a trap message. RouterOS spells the same "I do
@@ -535,16 +556,35 @@ func (c *routerOSAPIConn) query(cmd string, args ...string) ([]map[string]string
 			return rows, nil
 		case "!empty":
 			// RouterOS 7.18+ answers a print that returns no rows with an
-			// !empty sentence instead of !done. It is terminal: there is
-			// nothing after it, so the query must return here or the next
-			// read blocks until the deadline and fails the whole poll.
+			// !empty sentence instead of !done. It announces "no data",
+			// not the end of the reply: the same builds close with
+			// [!empty][!done], so the tail must be drained before the
+			// next query reads the leftover as its own first sentence.
+			if err := c.drainTrailing(); err != nil {
+				return nil, err
+			}
 			return rows, nil
 		case "!trap":
 			category, message := trapDetail(sentence[1:])
 			// category 0 is "missing item or command": the menu or item the
 			// poller asked for does not exist on this device. The message
 			// phrases stay as a fallback for traps that omit the category.
-			return nil, trapErrorf(category == 0 || menuMissingReply(message), "routeros api %s: %s", cmd, message)
+			// A trap is not always the end of the reply either: RouterOS
+			// 7.24.6 (long-term) answers a missing legacy menu with TWO
+			// traps and a closing !done; every unread sentence would be
+			// read as the first sentence of the next query and shift its
+			// reply by one, starving the sections polled last.
+			trapErr := trapErrorf(category == 0 || menuMissingReply(message), category, "routeros api %s: %s", cmd, message)
+			if err := c.drainTrailing(); err != nil {
+				return nil, err
+			}
+			return nil, trapErr
+		case "!fatal":
+			// RouterOS sends !fatal when it is about to close the
+			// connection. No reply of this query can follow, so the
+			// session is unusable and the poll must fail instead of
+			// waiting for a sentence that will never arrive.
+			return nil, protocolErrorf("routeros api %s: %s", cmd, strings.Join(sentence[1:], " "))
 		case "!re":
 			row := map[string]string{}
 			for _, w := range sentence[1:] {
@@ -556,6 +596,60 @@ func (c *routerOSAPIConn) query(cmd string, args ...string) ([]map[string]string
 			rows = append(rows, row)
 		}
 	}
+}
+
+// trailingQuiet bounds how long drainTrailing keeps listening for
+// further sentences of the reply whose terminal sentence was just
+// read. RouterOS sends every sentence of one reply back to back, so a
+// silent gap of this size means the reply is over.
+const trailingQuiet = 150 * time.Millisecond
+
+// drainTrailing consumes the rest of the reply whose terminal sentence
+// was just read. The API specification is explicit: the last reply for
+// every sentence is the one that starts with !done, and the builds seen
+// in the field honour it, so a print without rows answers
+// [!empty][!done] and a refused command [!trap][!done]. Reading stops
+// at that !done, which is the normal case and costs nothing. A build
+// that closes the reply at !trap or !empty without the !done is not
+// compliant but must not stall the poller, so the same reads run under
+// a short deadline whose expiry between sentences closes the drain.
+// Nothing else can be in flight: the client sends the next command only
+// after the current query returns.
+func (c *routerOSAPIConn) drainTrailing() error {
+	if err := c.conn.SetReadDeadline(time.Now().Add(trailingQuiet)); err != nil {
+		return nil
+	}
+	// Far beyond any observed tail; the cap only keeps a hostile peer
+	// from holding the session.
+	for i := 0; i < 16; i++ {
+		var sentence []string
+		for {
+			w, err := readRouterOSWord(c.r)
+			if err != nil {
+				// A quiet deadline between sentences means the reply is
+				// over. The same error once a further sentence began
+				// leaves the rest of it unread, and the next query would
+				// parse that remainder as its own reply: fail here
+				// instead of pushing data shifted by it.
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() && len(sentence) == 0 {
+					return nil
+				}
+				return err
+			}
+			if w == "" {
+				break
+			}
+			sentence = append(sentence, w)
+		}
+		switch {
+		case len(sentence) > 0 && sentence[0] == "!done":
+			return nil
+		case len(sentence) > 0 && sentence[0] == "!fatal":
+			return protocolErrorf("routeros api: %s", strings.Join(sentence[1:], " "))
+		}
+	}
+	return nil
 }
 
 func (c *routerOSAPIConn) writeSentence(words ...string) error {
@@ -821,8 +915,20 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		if err := conn.writeSentence("/system/package/update/check-for-updates"); err != nil {
 			return nil, fmt.Errorf("query /system/package/update/check-for-updates: %w", err)
 		}
-		if _, err := conn.readSentence(); err != nil {
+		sentence, err := conn.readSentence()
+		if err != nil {
 			return nil, fmt.Errorf("query /system/package/update/check-for-updates: %w", err)
+		}
+		// The refusal answer is not always a single sentence: a read-only
+		// user gets [!trap category=9][!done]. The trailing sentence is
+		// part of the same reply and must be drained, or the re-print
+		// below reads the leftover !done as its own terminal answer and
+		// starves the sections that follow. A reply that already closed
+		// with !done has nothing behind it.
+		if len(sentence) == 0 || sentence[0] != "!done" {
+			if err := conn.drainTrailing(); err != nil {
+				return nil, fmt.Errorf("query /system/package/update/check-for-updates: %w", err)
+			}
 		}
 		rowsAfter, err := conn.queryRows("/system/package/update/print")
 		if err != nil {
@@ -830,11 +936,37 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		}
 		sys.FirmwareAvailable = routerOSPackageUpdate(rowsAfter)
 	}
+	// The WAN rate needs the egress interface of the default route. The
+	// pre-7 /ip/route menu is the compatibility one: on some builds a
+	// read-only API user gets it refused outright (not enough
+	// permissions, category 9) even though the CLI prints it, and on
+	// others its rows carry a bare gateway address with no interface
+	// word. Both times the native /routing/route menu has the answer:
+	// its default-route row carries the egress inside immediate-gw as
+	// "<gateway>%<interface>". Querying the native menu only after the
+	// compatibility one gives nothing keeps the extra query off boxes
+	// that answer it in full, and a box that refuses both keeps the
+	// clients and pushes no rate, like any other missing menu.
 	routeRows, err := conn.queryRows("/ip/route/print")
+	wanIface := ""
 	if err != nil {
-		return nil, err
+		if !isMenuMissing(err) && !isPermissionDenied(err) {
+			return nil, err
+		}
+	} else {
+		wanIface = routerOSWANInterface(routeRows)
 	}
-	if wanIface := routerOSWANInterface(routeRows); wanIface != "" {
+	if wanIface == "" {
+		nativeRows, nativeErr := conn.queryRows("/routing/route/print")
+		if nativeErr != nil {
+			if !isMenuMissing(nativeErr) && !isPermissionDenied(nativeErr) {
+				return nil, nativeErr
+			}
+		} else {
+			wanIface = routerOSWANInterface(nativeRows)
+		}
+	}
+	if wanIface != "" {
 		sys.RxBps, sys.TxBps = p.netRate(ifRows, wanIface)
 	}
 	return data, nil
@@ -878,6 +1010,13 @@ func (p *Poller) netRate(ifRows []map[string]string, wanIface string) (*float64,
 	return &rx, &tx
 }
 
+// routerOSWANInterface finds the egress interface of the default route.
+// On the compatibility /ip/route menu the interface is its own word, and
+// a gateway that is not an address IS the interface name (a PPPoE or a
+// dial-on-demand link). The native /routing/route menu has no interface
+// word at all: it packs gateway and egress into immediate-gw and
+// gateway-status as "<gateway>%<interface>", or leaves a bare name for
+// a connected route.
 func routerOSWANInterface(routeRows []map[string]string) string {
 	for _, row := range routeRows {
 		if row["dst-address"] != "0.0.0.0/0" {
@@ -888,6 +1027,38 @@ func routerOSWANInterface(routeRows []map[string]string) string {
 		}
 		if gw := row["gateway"]; gw != "" && net.ParseIP(gw) == nil {
 			return gw
+		}
+		if iface := wanEgressOf(row["immediate-gw"], true); iface != "" {
+			return iface
+		}
+		if iface := wanEgressOf(row["gateway-status"], false); iface != "" {
+			return iface
+		}
+	}
+	return ""
+}
+
+// wanEgressOf extracts the egress interface from a comma-separated list
+// of immediate-gw or gateway-status entries. An entry packs it as
+// "<gateway>%<interface>"; gateway-status adds a state word behind it
+// ("207.188.168.1%pepephone reachable"). A bare entry is an interface
+// name only when immediate-gw carries it that way (a connected route):
+// gateway-status entries without a % are per-target state words and are
+// skipped, and a bare address names no interface either way.
+func wanEgressOf(raw string, bareNameOK bool) string {
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, after, ok := strings.Cut(entry, "%"); ok {
+			if fields := strings.Fields(after); len(fields) > 0 && fields[0] != "" {
+				return fields[0]
+			}
+			continue
+		}
+		if bareNameOK && net.ParseIP(entry) == nil && !strings.ContainsAny(entry, " \t") {
+			return entry
 		}
 	}
 	return ""

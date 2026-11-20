@@ -338,6 +338,30 @@ func TestBridgeMACPicksTheLowestBridgeID(t *testing.T) {
 	}
 }
 
+func TestSystemExtenderLive(t *testing.T) {
+	// The extender's own show/system: the poller's direct-member path feeds
+	// exactly this fixture. Memory appears in both shapes KeeneticOS emits —
+	// the "free/total" KiB string and the memtotal/memfree integers — and
+	// bytes must come out honest either way.
+	sys := System(fixture(t, "system_extender.json"), nil)
+	if sys == nil {
+		t.Fatal("System = nil")
+	}
+	if sys.CPU == nil || *sys.CPU != 4 {
+		t.Fatalf("cpu = %+v, want 4", sys.CPU)
+	}
+	if sys.SysInfo == nil || sys.SysInfo.Uptime != 1070943 {
+		t.Fatalf("uptime = %+v, want 1070943", sys.SysInfo)
+	}
+	mem := sys.SysInfo.Memory
+	if mem.Total != 262144*1024 || mem.Free != 45964*1024 {
+		t.Fatalf("memory = %+v, want memtotal/memfree KiB converted to bytes", mem)
+	}
+	if mem.Used != mem.Total-mem.Free {
+		t.Fatalf("used = %+v", mem)
+	}
+}
+
 func TestRadiosFromInterfacesLive(t *testing.T) {
 	radios := RadiosFromInterfaces(fixture(t, "interface_5_1.json"))
 	if len(radios) != 2 {

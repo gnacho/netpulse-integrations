@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,7 +77,7 @@ type errBadUnit struct {
 }
 
 func (e errBadUnit) Error() string {
-	return "unit " + itoa(e.unit) + ": " + e.why
+	return "unit " + strconv.Itoa(e.unit) + ": " + e.why
 }
 
 var errNoUnits = errFleet("at least one unit is required")
@@ -84,18 +85,6 @@ var errNoUnits = errFleet("at least one unit is required")
 type errFleet string
 
 func (e errFleet) Error() string { return string(e) }
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	digits := ""
-	for n > 0 {
-		digits = string(rune('0'+n%10)) + digits
-		n /= 10
-	}
-	return digits
-}
 
 // UnitResult is one unit's cycle outcome.
 type UnitResult struct {

@@ -51,13 +51,14 @@ func runFleet(ctx context.Context, configPath string) error {
 		return err
 	}
 	slog.Info("keenetic-pusher: fleet mode", "units", len(cfg.Units), "interval", cfg.Interval.String(), "version", Version)
-	return fleet.Run(ctx, cfg.Interval, fleetPush(ctx, pushClient, cfg))
+	return fleet.Run(ctx, cfg.Interval, fleetPush(pushClient, cfg))
 }
 
 // fleetPush signs and sends one unit payload; the envelope fields follow the
-// same contract the shared single-unit loop fills.
-func fleetPush(ctx context.Context, client *push.Client, cfg *keenetic.FleetConfig) keenetic.PushFunc {
-	return func(_ context.Context, unit keenetic.Unit, data *probe.PayloadData) error {
+// same contract the shared single-unit loop fills. It uses the cycle context
+// Run hands it, not an outer one.
+func fleetPush(client *push.Client, cfg *keenetic.FleetConfig) keenetic.PushFunc {
+	return func(ctx context.Context, unit keenetic.Unit, data *probe.PayloadData) error {
 		payload := &probe.Payload{Data: *data}
 		payload.Router = unit.Slug
 		payload.Ts = time.Now().Unix()

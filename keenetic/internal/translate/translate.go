@@ -645,10 +645,11 @@ func Wireless(raw json.RawMessage, excludeMACs map[string]bool) *probe.WirelessD
 			// without a reading cannot be represented honestly.
 			continue
 		}
+		// LIVE-CONFIRMED band mapping: WifiMaster0 → 2.4 GHz, WifiMaster1 →
+		// 5 GHz. An AP name outside that scheme has no honest band: the
+		// client keeps an empty band rather than a guessed one that would
+		// file a 5 GHz station under the wrong matrix row.
 		band := bandFromAP(st.AP)
-		if band == "" {
-			band = "2.4 GHz" // fallback for unusual AP names; fixture to confirm
-		}
 		c := probe.WirelessClient{
 			SignalDbm: *st.RSSI,
 			Band:      band,

@@ -301,6 +301,25 @@ func TestWirelessExtenderLive(t *testing.T) {
 	}
 }
 
+func TestWirelessUnknownAPKeepsEmptyBand(t *testing.T) {
+	// A station whose AP name does not parse as a WifiMaster band has no
+	// honest band: it must NOT be filed under 2.4 GHz (a guessed band would
+	// put a 5 GHz client in the wrong matrix row). The client itself stays —
+	// signal, interface and counters are real.
+	const doc = `{"station":[{"mac":"0e:00:00:00:aa:01","ap":"WifiMaster9/AccessPoint0","authenticated":true,"rssi":-48,"rxbytes":10,"txbytes":20}]}`
+	w := Wireless(json.RawMessage(doc), nil)
+	if w == nil || len(w.Clients) != 1 {
+		t.Fatalf("clients = %+v, want the station", w)
+	}
+	c := w.Clients["0E:00:00:00:AA:01"]
+	if c.Band != "" {
+		t.Fatalf("band = %q, want empty (no honest band for the AP name)", c.Band)
+	}
+	if c.SignalDbm != -48 || c.Iface != "WifiMaster9/AccessPoint0" {
+		t.Fatalf("client = %+v", c)
+	}
+}
+
 func TestRadiosFromInterfacesLive(t *testing.T) {
 	radios := RadiosFromInterfaces(fixture(t, "interface_5_1.json"))
 	if len(radios) != 2 {

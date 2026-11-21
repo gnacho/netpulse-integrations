@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The controller unit now reports its own pending firmware update. LIVE
+  (2026-11-21): the controller gives itself no `fw-available` anywhere in the
+  show tree — but every `show/mws/member` entry echoes the controller's own
+  update-check result (`fw-release-available`/`fw-available`/
+  `fw-update-sandbox`). KeeneticOS releases move as one train per sandbox, so
+  a pointer strictly newer than the controller's installed `release` (numeric
+  run compare — ".10." > ".8." — and same sandbox) means the controller is
+  updatable too; an equal pointer raises no badge.
 - Pin the unit certificate by SPKI: `cert_fp` (supervisor entry and fleet
   config), `KEENETIC_CERT_FP` (single-unit env). A pinned handshake accepts
   only the configured key; a bad pin fails at configuration time. Mutually

@@ -210,7 +210,44 @@ func TestPollControllerUnit(t *testing.T) {
 		t.Fatal("rates must stay absent without counters")
 	}
 	if data.System.FirmwareAvailable != "" {
-		t.Fatalf("the controller itself has no fw-available source, got %q", data.System.FirmwareAvailable)
+		t.Fatalf("mesh pointers equal the controller release: no badge allowed, got %q", data.System.FirmwareAvailable)
+	}
+}
+
+// TestPollControllerFirmwareUpdateDerivedFromMesh pins the controller's own
+// update badge: show/mws/member echoes the controller's update-check result
+// (fw-release-available / fw-available / fw-update-sandbox) per member, and
+// the controller reports its availability nowhere else. A pointer newer
+// than the controller's installed release, same sandbox, means the
+// controller itself is updatable.
+func TestPollControllerFirmwareUpdateDerivedFromMesh(t *testing.T) {
+	f := newFakeRCI(t, fixtureDir(t), false)
+	memberJSON, err := os.ReadFile(filepath.Join(fixtureDir(t), "mws_member_mesh.json"))
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(memberJSON, &list); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	list[0]["fw-available"] = "5.1.10"
+	list[0]["fw-release-available"] = "5.01.C.10.0-0"
+	rewritten, err := json.Marshal(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.paths["show/mws/member"] = string(rewritten)
+
+	p, err := New(Config{Host: f.server.URL, User: "viewer", Password: "x"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if data.System.FirmwareAvailable != "5.1.10" {
+		t.Fatalf("controller badge = %q, want 5.1.10 from the mesh release pointer", data.System.FirmwareAvailable)
 	}
 }
 

@@ -48,6 +48,7 @@ type Section struct {
 type versionDoc struct {
 	Title   string `json:"title"`
 	Release string `json:"release"`
+	Sandbox string `json:"sandbox"`
 	Model   string `json:"model"`
 	HWID    string `json:"hw_id"`
 	NDM     struct {
@@ -99,7 +100,13 @@ type memberDoc struct {
 	HWID        string `json:"hw_id"`
 	FW          string `json:"fw"`
 	FWAvailable string `json:"fw-available"`
-	System      *struct {
+	// The controller's own update-check result, echoed per member: the
+	// release build id (universal KeeneticOS train, e.g. "5.01.C.10.0-0")
+	// and the sandbox it belongs to. The controller reports neither for
+	// ITSELF anywhere else in the show tree (LIVE 2026-11-21).
+	FWReleaseAvailable string `json:"fw-release-available"`
+	FWUpdateSandbox    string `json:"fw-update-sandbox"`
+	System             *struct {
 		CPULoad *int     `json:"cpuload"`
 		Memory  string   `json:"memory"` // "free/total" in KiB (live fixture)
 		Uptime  *flexInt `json:"uptime"` // seconds as a STRING on 5.x
@@ -254,6 +261,125 @@ func memberFW(raw json.RawMessage) string {
 // dottedVersion matches the first dotted numeric version inside a string
 // ("5.1.8", "5.1.8.0-d43bd79"); empty for build-only suffixes ("0-d43bd79").
 var dottedVersion = regexp.MustCompile(`\d+(?:\.\d+)+`)
+
+// releaseRuns splits a KeeneticOS release id into its digit and letter
+// runs: "5.01.C.10.0-0" -> 5, 01, C, 10, 0, 0. Separators vanish; runs
+// carry the ordering.
+func releaseRuns(s string) []string {
+	var runs []string
+	for i := 0; i < len(s); {
+		digit := s[i] >= '0' && s[i] <= '9'
+		letter := !digit && (s[i] >= 'a' && s[i] <= 'z' || s[i] >= 'A' && s[i] <= 'Z')
+		if !digit && !letter {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && (s[j] >= '0' && s[j] <= '9') == digit && (s[j] >= 'a' && s[j] <= 'z' || s[j] >= 'A' && s[j] <= 'Z') == letter {
+			j++
+		}
+		runs = append(runs, s[i:j])
+		i = j
+	}
+	return runs
+}
+
+// compareNDMRelease orders two release build ids ("5.01.C.8.0-2" vs
+// "5.01.C.10.0-0"): digit runs compare NUMERICALLY — plain string order
+// would claim ".8." > ".10." — letter runs lexicographically, and a shorter
+// run list is older. -1 when a < b, 0 when equal, +1 when a > b.
+func compareNDMRelease(a, b string) int {
+	ra, rb := releaseRuns(a), releaseRuns(b)
+	for i := 0; i < len(ra) && i < len(rb); i++ {
+		x, y := ra[i], rb[i]
+		if x == y {
+			continue
+		}
+		xNum := x[0] >= '0' && x[0] <= '9'
+		yNum := y[0] >= '0' && y[0] <= '9'
+		if xNum && yNum {
+			x = strings.TrimLeft(x, "0")
+			y = strings.TrimLeft(y, "0")
+			if len(x) != len(y) {
+				if len(x) < len(y) {
+					return -1
+				}
+				return 1
+			}
+			if x != y {
+				if x < y {
+					return -1
+				}
+				return 1
+			}
+			continue
+		}
+		if !xNum && !yNum {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+		// digit vs letter: the digit is the train's version number, the
+		// letter its release-series tag; aligned runs of different kinds
+		// only meet across trains, where the digit (older id position)
+		// loses deterministically.
+		if xNum {
+			return -1
+		}
+		return 1
+	}
+	switch {
+	case len(ra) < len(rb):
+		return -1
+	case len(ra) > len(rb):
+		return 1
+	}
+	return 0
+}
+
+// ControllerFirmwareAvailable derives the controller's own pending firmware
+// update from the mesh release pointer. LIVE FINDING (2026-11-21): the
+// controller reports fw-available for every MEMBER (show/mws/member carries
+// fw-available / fw-release-available / fw-update-sandbox, produced by the
+// controller's own update check) but for ITSELF nowhere in the show tree —
+// no show/version field, no show/update, no directory enumeration. Since
+// KeeneticOS releases move as one train across models inside one sandbox,
+// a member's pointer strictly newer than the controller's installed release
+// means the controller itself is updatable. Returns the release title
+// (e.g. "5.1.10") or "" when nothing newer shares the controller's sandbox.
+//
+// The one honest over-report risk: a controller model that left the train
+// (EOL) while a newer member model still moves. Mesh members stay on the
+// controller's train by design, so this does not arise in practice.
+func ControllerFirmwareAvailable(versionRaw json.RawMessage, members []json.RawMessage) string {
+	var v versionDoc
+	if len(versionRaw) == 0 || json.Unmarshal(versionRaw, &v) != nil || v.Release == "" {
+		return ""
+	}
+	bestRel := v.Release
+	var bestVer string
+	for _, raw := range members {
+		var m memberDoc
+		if len(raw) == 0 || json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		if m.FWReleaseAvailable == "" || m.FWAvailable == "" {
+			continue
+		}
+		if m.FWUpdateSandbox != "" && v.Sandbox != "" && m.FWUpdateSandbox != v.Sandbox {
+			continue // a different train: not comparable
+		}
+		if compareNDMRelease(m.FWReleaseAvailable, bestRel) > 0 {
+			bestRel = m.FWReleaseAvailable
+			bestVer = m.FWAvailable
+		}
+	}
+	if bestVer == "" || bestVer == v.Title {
+		return ""
+	}
+	return bestVer
+}
 
 // System maps show/system plus the mesh member entry (when the unit is a mesh
 // member) into SystemData. The member entry wins where it is richer: it also

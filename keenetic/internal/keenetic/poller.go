@@ -25,9 +25,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
 	"github.com/gnacho/netpulse-integrations/keenetic/internal/translate"
-	"github.com/gnacho/netpulse-integrations/internal/tlspin"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -322,6 +322,19 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 	// MAC set, so the server hangs the payload on the right unit.
 	if data.System == nil {
 		data.System = &probe.SystemData{}
+	}
+	// The controller reports fw-available for every member but for itself
+	// nowhere in the show tree: derive its pending update from the mesh
+	// release pointer the controller echoes in the member entries. A
+	// member unit already carries its own fw-available through sec.Member.
+	if unitMAC == "" && data.System.FirmwareAvailable == "" {
+		ptrs := make([]json.RawMessage, 0, len(members))
+		for _, info := range members {
+			ptrs = append(ptrs, info.Raw)
+		}
+		if av := translate.ControllerFirmwareAvailable(version, ptrs); av != "" {
+			data.System.FirmwareAvailable = av
+		}
 	}
 	if data.System.BridgeMAC == "" {
 		data.System.BridgeMAC = translate.BridgeMAC(ifaces, member)

@@ -224,6 +224,70 @@ func TestSystemFirmwareAvailableOnlyOnDifference(t *testing.T) {
 	}
 }
 
+func TestCompareNDMRelease(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want int
+	}{
+		{"5.01.C.8.0-2", "5.01.C.10.0-0", -1}, // digits are NUMERIC: .10. > .8.
+		{"5.01.C.10.0-0", "5.01.C.8.0-2", 1},
+		{"5.01.C.8.0-2", "5.01.C.8.0-2", 0},
+		{"5.01.C.10.0-0", "5.01.C.10.0-2", -1}, // build suffix orders too
+		{"5.01.C.9.0-0", "5.02.C.1.0-0", -1},   // series bump
+		{"5.01.C.8.0", "5.01.C.8.0-2", -1},     // shorter run list is older
+	}
+	for _, c := range cases {
+		if got := compareNDMRelease(c.a, c.b); got != c.want {
+			t.Fatalf("compareNDMRelease(%q, %q) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestControllerFirmwareAvailableFromMeshPointer(t *testing.T) {
+	// Fixture controller: release 5.01.C.8.0-2, title 5.1.8, sandbox
+	// stable; fixture members all point at 5.01.C.8.0-2 too.
+	version := fixture(t, "version_5_1.json")
+	raws := func(mut func(list []map[string]any)) []json.RawMessage {
+		var list []map[string]any
+		if err := json.Unmarshal(fixture(t, "mws_member_mesh.json"), &list); err != nil {
+			t.Fatalf("member fixture: %v", err)
+		}
+		if mut != nil {
+			mut(list)
+		}
+		var out []json.RawMessage
+		for _, e := range list {
+			b, err := json.Marshal(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, b)
+		}
+		return out
+	}
+	if got := ControllerFirmwareAvailable(version, raws(nil)); got != "" {
+		t.Fatalf("equal mesh pointer must not raise a badge, got %q", got)
+	}
+	if got := ControllerFirmwareAvailable(version, nil); got != "" {
+		t.Fatalf("a controller without members has no source, got %q", got)
+	}
+	newer := raws(func(list []map[string]any) {
+		list[1]["fw-available"] = "5.1.10"
+		list[1]["fw-release-available"] = "5.01.C.10.0-0"
+	})
+	if got := ControllerFirmwareAvailable(version, newer); got != "5.1.10" {
+		t.Fatalf("newer same-sandbox pointer lost: %q", got)
+	}
+	preview := raws(func(list []map[string]any) {
+		list[1]["fw-available"] = "5.2.0"
+		list[1]["fw-release-available"] = "5.02.B.1.0-0"
+		list[1]["fw-update-sandbox"] = "preview"
+	})
+	if got := ControllerFirmwareAvailable(version, preview); got != "" {
+		t.Fatalf("a different sandbox is a different train, got %q", got)
+	}
+}
+
 func TestHotspotWiredClients(t *testing.T) {
 	// LIVE shapes (2026-11-18): a controller-attached wired host carries a
 	// top-level "port"; a member-attached one carries the mws block with the

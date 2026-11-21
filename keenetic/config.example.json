@@ -1,0 +1,18 @@
+{
+  "server": "https://netpulse.example:3000",
+  "interval": "60s",
+  "host": "192.168.1.1",
+  "user": "netpulse-reader",
+  "password": "REPLACE_WITH_KEENETIC_READONLY_PASSWORD",
+  "units": [
+    {
+      "slug": "keenetic-main",
+      "token": "REPLACE_WITH_NETPULSE_AGENT_TOKEN"
+    },
+    {
+      "slug": "keenetic-ap1",
+      "token": "REPLACE_WITH_NETPULSE_AGENT_TOKEN",
+      "mac": "50:FF:20:AA:BB:CC"
+    }
+  ]
+}

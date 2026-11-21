@@ -28,6 +28,15 @@
       "description": "Read-only pusher for Realtek RTL9303 switches (FN/希力威视 ODM family) over their web backend, with an optional CLI probe for the fan temperature"
     },
     {
+      "id": "keenetic",
+      "mode": "local",
+      "arches": ["amd64", "arm64"],
+      "tagPrefix": "keenetic/v",
+      "binary": "keenetic-pusher",
+      "target": "keenetic/cmd/keenetic-pusher",
+      "description": "Read-only KeeneticOS pusher covering a whole mesh: system and interface state, wired clients from the hotspot FDB, wireless clients, the mesh tree from member backhaul reports, ARP/DHCP identities and firmware state"
+    },
+    {
       "id": "opnsense",
       "mode": "local",
       "arches": ["amd64", "arm64"],

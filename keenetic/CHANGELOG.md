@@ -7,6 +7,9 @@
   address used to default to plain http, which degraded a TLS-only member -
   or queried an http-accepting member without the pin - on an HTTPS
   controller with `cert_fp`.
+- The backhaul medium is set only from recognized evidence: `rssi` says
+  wifi, `speed`/`duplex` say cable, and an absent or unrecognizable backhaul
+  object now stays empty instead of inventing "cable".
 - The controller unit now reports its own pending firmware update. LIVE
   (2026-11-21): the controller gives itself no `fw-available` anywhere in the
   show tree — but every `show/mws/member` entry echoes the controller's own

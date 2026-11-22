@@ -442,13 +442,16 @@ func System(raw json.RawMessage, member json.RawMessage) *probe.SystemData {
 				out.FirmwareAvailable = mem.FWAvailable
 			}
 			// Backhaul medium. LIVE FINDING: the backhaul object is present
-			// for BOTH media on KeeneticOS 5.x — a wireless uplink carries an
+			// for BOTH media on KeeneticOS 5.x - a wireless uplink carries an
 			// rssi field (the extender reports the signal to its upstream
-			// AP), a wired one carries speed/duplex instead. Distinguish by
-			// the rssi key, not by object presence.
-			if backhaulIsWireless(mem.Backhaul) {
+			// AP), a wired one carries speed/duplex instead. Only recognized
+			// evidence sets the medium: an absent or unrecognizable object
+			// stays empty (NetPulse holds the last good value) rather than
+			// inventing "cable" (review round 2).
+			switch backhaulMedium(mem.Backhaul) {
+			case "wifi":
 				out.Backhaul = "wifi"
-			} else {
+			case "cable":
 				out.Backhaul = "cable"
 			}
 		}
@@ -459,16 +462,31 @@ func System(raw json.RawMessage, member json.RawMessage) *probe.SystemData {
 	return out
 }
 
-// backhaulIsWireless reports whether the mesh member's backhaul document
-// describes a radio uplink (an rssi field) rather than an ethernet one.
-func backhaulIsWireless(raw json.RawMessage) bool {
-	if len(raw) == 0 || string(raw) == "null" || string(raw) == "{}" {
-		return false
+// backhaulMedium classifies the mesh member's backhaul document: "wifi" on
+// rssi evidence (the radio uplink), "cable" on speed/duplex evidence (the
+// ethernet uplink), "" when the document is absent or carries nothing
+// recognizable. LIVE (5.x): the object is present on BOTH media, so key
+// evidence - not object presence - decides. REVIEW FIX (round 2): absence
+// used to fall through to "cable"; a missing medium is not a wire.
+func backhaulMedium(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
 	}
 	var bh struct {
-		RSSI *int `json:"rssi"`
+		RSSI   *flexInt `json:"rssi"`   // number, or numeric string
+		Speed  *flexInt `json:"speed"`  // live: "1000" as a string
+		Duplex *string  `json:"duplex"` // "full" / "half"
 	}
-	return json.Unmarshal(raw, &bh) == nil && bh.RSSI != nil
+	if json.Unmarshal(raw, &bh) != nil {
+		return ""
+	}
+	switch {
+	case bh.RSSI != nil:
+		return "wifi"
+	case bh.Speed != nil || bh.Duplex != nil:
+		return "cable"
+	}
+	return ""
 }
 
 // kibOr converts a KiB figure from show/system into bytes; nil stays zero.

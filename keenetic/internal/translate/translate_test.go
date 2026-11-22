@@ -115,6 +115,35 @@ func TestSystemControllerLive(t *testing.T) {
 	}
 }
 
+func TestBackhaulMediumNeedsEvidence(t *testing.T) {
+	// REVIEW FIX (round 2): absence is not a wire. Only rssi evidence says
+	// wifi, only speed/duplex evidence says cable; an object with neither -
+	// or a missing one - stays empty.
+	cases := map[string]string{
+		`null`:                                "",
+		`{}`:                                  "",
+		`{"link":"up","txrate":576}`:          "",
+		`{"uplink":"GigabitEthernet0/Vlan1"}`: "",
+		`{"rssi":-42}`:                        "wifi",
+		`{"rssi":"-42"}`:                      "wifi",
+		`{"speed":"1000","duplex":"full"}`:    "cable",
+		`{"speed":1000}`:                      "cable",
+		`{"duplex":"half"}`:                   "cable",
+	}
+	for raw, want := range cases {
+		if got := backhaulMedium(json.RawMessage(raw)); got != want {
+			t.Fatalf("backhaulMedium(%s) = %q, want %q", raw, got, want)
+		}
+	}
+	// A member whose backhaul is unrecognizable reports no medium at all:
+	// the rest of its system section stays intact.
+	const member = `{"model":"Buddy 6 (KN-3411)","system":{"cpuload":2},"backhaul":{"txrate":576}}`
+	s := System(nil, json.RawMessage(member))
+	if s == nil || s.Backhaul != "" || s.CPU == nil || *s.CPU != 2 {
+		t.Fatalf("system = %+v, want cpu 2 with an empty backhaul", s)
+	}
+}
+
 func TestMemberBackhaul(t *testing.T) {
 	members := MembersMap(fixture(t, "mws_member_mesh.json"))
 	if len(members) != 3 {

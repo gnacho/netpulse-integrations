@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +98,30 @@ func New(cfg Config) (*Poller, error) {
 		samples: map[string]*rateSample{},
 		clients: map[string]*keeneticapi.Client{},
 	}, nil
+}
+
+// memberAddr builds a member's management URL: the controller's scheme and
+// explicitly configured port applied to the management address the member
+// report carries. LIVE FIX (review round 2): the bare report IP used to
+// default to http:// inside the client, so an HTTPS controller with a pinned
+// certificate degraded a TLS-only member (unreachable over plain http) - or
+// queried an http-accepting member WITHOUT the pin, although the pin covers
+// every fleet unit. A member address that already carries a port is used
+// as-is (host:port, the tests rely on it).
+func (p *Poller) memberAddr(memberIP string) string {
+	host := strings.TrimSpace(p.cfg.Host)
+	if !strings.Contains(host, "://") {
+		host = "http://" + host // the client's own bare-host default
+	}
+	u, err := url.Parse(host)
+	if err != nil {
+		return memberIP // the controller client validated this host already; defensive
+	}
+	addr := memberIP
+	if !strings.Contains(addr, ":") && u.Port() != "" {
+		addr += ":" + u.Port()
+	}
+	return u.Scheme + "://" + addr
 }
 
 // client returns the RCI client of one address, creating it on first use and
@@ -226,7 +251,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 		}
 	} else {
 		if memberIP != "" {
-			memberAPI, _ = p.client(memberIP) // invalid member address = unreachable member
+			memberAPI, _ = p.client(p.memberAddr(memberIP)) // invalid member address = unreachable member
 		}
 		if memberAPI == nil {
 			degraded = true
@@ -249,7 +274,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 		}
 		if degraded {
 			slog.Info("keenetic: member unreachable, degrading to the controller's facts",
-				"unit", unitMAC, "member_addr", memberIP)
+				"unit", unitMAC, "member_addr", p.memberAddr(memberIP))
 		}
 	}
 

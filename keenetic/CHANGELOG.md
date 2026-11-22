@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Mesh members inherit the controller's scheme and explicitly configured
+  port, and the TLS pin covers every fleet unit: the member's management
+  address used to default to plain http, which degraded a TLS-only member -
+  or queried an http-accepting member without the pin - on an HTTPS
+  controller with `cert_fp`.
 - The controller unit now reports its own pending firmware update. LIVE
   (2026-11-21): the controller gives itself no `fw-available` anywhere in the
   show tree — but every `show/mws/member` entry echoes the controller's own

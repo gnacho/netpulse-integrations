@@ -108,6 +108,12 @@ are visible in the controller's web UI (Wi-Fi System page) or via
 certificate with `"cert_fp": "<sha256 SPKI>"` (the same key the fleet
 config takes).
 
+A member is reached with the controller's scheme and explicitly configured
+port: an `https://192.168.88.2:8443` controller polls its members at
+`https://<member>:8443`, and one `cert_fp` covers every hop the poller
+makes (the pin is per entry; a KeeneticOS fleet runs one certificate per
+device, so an entry pins the certificate the units it contacts present).
+
 ### Choosing slugs and units
 
 - The controller (or a standalone router): `host` = its address, no `mac`.

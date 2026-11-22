@@ -2,9 +2,18 @@ package keenetic
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
 )
@@ -498,6 +508,165 @@ func TestPollMemberNotInMeshList(t *testing.T) {
 func TestNewRejectsBadUnitMAC(t *testing.T) {
 	if _, err := New(Config{Host: "http://x", User: "u", Password: "p", UnitMAC: "nothex"}); err == nil {
 		t.Fatal("a non-MAC unit selector must be rejected")
+	}
+}
+
+// testUnitCert generates one self-signed certificate shared by BOTH fake
+// TLS units: the fleet pins ONE digest per poller, and both hops - the
+// controller address the poller starts at and the member address it
+// switches to - must present the certificate that digest names.
+func testUnitCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "keenetic-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
+}
+
+// startTLSUnit runs one fake RCI mux over TLS with the shared unit
+// certificate. The pin handshake lives in the client; these servers only
+// serve the paths each role (controller / member) answers.
+func startTLSUnit(t *testing.T, cert tls.Certificate, mux *http.ServeMux) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(mux)
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestMemberAddrInheritsSchemeAndPort pins the member address rule: the
+// controller's scheme - and its explicitly configured port - travel to the
+// member; a member address that already carries a port is used as-is.
+func TestMemberAddrInheritsSchemeAndPort(t *testing.T) {
+	cases := []struct{ host, ip, want string }{
+		{"192.168.88.2", "198.18.0.35", "http://198.18.0.35"},                     // bare host defaults to http, no port to inherit
+		{"http://192.168.88.2", "198.18.0.35", "http://198.18.0.35"},              // explicit http
+		{"https://192.168.88.2:8443", "198.18.0.35", "https://198.18.0.35:8443"},  // scheme AND explicit port travel
+		{"https://192.168.88.2", "198.18.0.35", "https://198.18.0.35"},            // default https port: nothing to append
+		{"https://192.168.88.2:8443", "198.18.0.35:80", "https://198.18.0.35:80"}, // host:port in the report is used as-is
+	}
+	for _, c := range cases {
+		p, err := New(Config{Host: c.host, User: "u", Password: "p"})
+		if err != nil {
+			t.Fatalf("New(%q): %v", c.host, err)
+		}
+		if got := p.memberAddr(c.ip); got != c.want {
+			t.Fatalf("memberAddr(%q on %q) = %q, want %q", c.ip, c.host, got, c.want)
+		}
+	}
+}
+
+// TestPollMemberTLSMemberClientInheritsSchemeAndPin pins the round-2 fix end
+// to end: with an HTTPS controller and a certificate pin, the member's own
+// RCI must be reached over TLS WITH the pin (the fleet pin covers every
+// unit) instead of being degraded through a plain-http guess. The member
+// probe answers a distinctive model and cpu, so "the member's own RCI
+// answered" is provable from the payload; the wrong pin fails as a
+// transport error, not an AuthError.
+func TestPollMemberTLSMemberClientInheritsSchemeAndPin(t *testing.T) {
+	cert := testUnitCert(t)
+	sum := sha256.Sum256(cert.Leaf.RawSubjectPublicKeyInfo)
+	pin := "sha256/" + hex.EncodeToString(sum[:])
+
+	base := func() *http.ServeMux {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/auth", func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				w.Header().Set("X-NDM-Realm", "Keenetic Test")
+				w.Header().Set("X-NDM-Challenge", "0123456789abcdef0123456789abcdef")
+				http.SetCookie(w, &http.Cookie{Name: "sess-tls", Value: "sid", HttpOnly: true})
+				w.WriteHeader(http.StatusUnauthorized)
+			case http.MethodPost:
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			}
+		})
+		mux.HandleFunc("/rci/show/ip/hotspot", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"host":[]}`))
+		})
+		return mux
+	}
+
+	member := base()
+	member.HandleFunc("/rci/show/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"title":"5.1.8","model":"Member-TLS-Probe"}`))
+	})
+	member.HandleFunc("/rci/show/system", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"hostname":"keenetic-member","cpuload":4}`))
+	})
+	memberSrv := startTLSUnit(t, cert, member)
+
+	controller := base()
+	controller.HandleFunc("/rci/show/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"title":"5.1.8","release":"5.01.C.8.0-2","sandbox":"stable","model":"Ultra (KN-1811)"}`))
+	})
+	controller.HandleFunc("/rci/show/system", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"hostname":"keenetic-main","cpuload":3}`))
+	})
+	controller.HandleFunc("/rci/show/mws/member", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"cid":"cid-tls-1","mac":"02:AD:EF:c1:80:8a","model":"Buddy 6 (KN-3411)","ip":"` +
+			strings.TrimPrefix(memberSrv.URL, "https://") + `","mode":"extender","hw_id":"KN-3411","fw":"5.1.8","fw-available":"5.1.8","system":{"cpuload":1},"backhaul":{"uplink":"WifiMaster1/WifiStation0","rssi":-42}}]`))
+	})
+	ctrlSrv := startTLSUnit(t, cert, controller)
+
+	poller := func(pinValue string) *Poller {
+		t.Helper()
+		p, err := New(Config{
+			Host:    ctrlSrv.URL,
+			User:    "u",
+			Password: "p",
+			UnitMAC: "02:AD:EF:c1:80:8a",
+			CertFP:  pinValue,
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return p
+	}
+
+	data, err := poller(pin).Poll(context.Background())
+	if err != nil {
+		t.Fatalf("a pinned member must be polled over TLS, not degraded: %v", err)
+	}
+	if data.System == nil || data.System.CPU == nil || *data.System.CPU != 4 {
+		t.Fatalf("cpu = %+v, want 4 from the member's own show/system over TLS", data.System)
+	}
+	if data.System.Board == nil || data.System.Board.Model != "Member-TLS-Probe" {
+		t.Fatalf("board = %+v, want the member's own show/version over TLS", data.System.Board)
+	}
+
+	// The pin covers everything the poller contacts: a WRONG pin fails the
+	// controller hop itself, as a transport error - not an AuthError, which
+	// would disable the unit over a certificate mismatch.
+	data, err = poller("sha256/0000000000000000000000000000000000000000000000000000000000000000").Poll(context.Background())
+	var authErr *keeneticapi.AuthError
+	if err == nil || errors.As(err, &authErr) {
+		t.Fatalf("err = %v, want a non-auth TLS failure from the wrong pin", err)
 	}
 }
 

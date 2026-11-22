@@ -278,6 +278,20 @@ func TestControllerFirmwareAvailableFromMeshPointer(t *testing.T) {
 	if got := ControllerFirmwareAvailable(version, newer); got != "5.1.10" {
 		t.Fatalf("newer same-sandbox pointer lost: %q", got)
 	}
+	// Strict same-sandbox (review round 2): an UNKNOWN sandbox on either
+	// side is no evidence of the same train - no badge.
+	noMemberSandbox := raws(func(list []map[string]any) {
+		list[1]["fw-available"] = "5.1.10"
+		list[1]["fw-release-available"] = "5.01.C.10.0-0"
+		delete(list[1], "fw-update-sandbox")
+	})
+	if got := ControllerFirmwareAvailable(version, noMemberSandbox); got != "" {
+		t.Fatalf("an unknown member sandbox must not infer an update, got %q", got)
+	}
+	controllerNoSandbox := json.RawMessage(`{"release":"5.01.C.8.0-2","title":"5.1.8"}`)
+	if got := ControllerFirmwareAvailable(controllerNoSandbox, newer); got != "" {
+		t.Fatalf("an unknown controller sandbox must not infer an update, got %q", got)
+	}
 	preview := raws(func(list []map[string]any) {
 		list[1]["fw-available"] = "5.2.0"
 		list[1]["fw-release-available"] = "5.02.B.1.0-0"

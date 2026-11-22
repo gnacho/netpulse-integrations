@@ -350,8 +350,12 @@ func compareNDMRelease(a, b string) int {
 // (e.g. "5.1.10") or "" when nothing newer shares the controller's sandbox.
 //
 // The one honest over-report risk: a controller model that left the train
-// (EOL) while a newer member model still moves. Mesh members stay on the
-// controller's train by design, so this does not arise in practice.
+// (EOL) while a newer member model still moves. DECISION (review round 2):
+// accepted and documented. Mesh members stay on the controller's train by
+// design, so the badge can only over-report for a controller whose own
+// model is EOL while its mesh still moves; the alternative - no derivation -
+// leaves the controller blind, and the badge is informational only (nothing
+// in this integration acts on it).
 func ControllerFirmwareAvailable(versionRaw json.RawMessage, members []json.RawMessage) string {
 	var v versionDoc
 	if len(versionRaw) == 0 || json.Unmarshal(versionRaw, &v) != nil || v.Release == "" {
@@ -367,8 +371,12 @@ func ControllerFirmwareAvailable(versionRaw json.RawMessage, members []json.RawM
 		if m.FWReleaseAvailable == "" || m.FWAvailable == "" {
 			continue
 		}
-		if m.FWUpdateSandbox != "" && v.Sandbox != "" && m.FWUpdateSandbox != v.Sandbox {
-			continue // a different train: not comparable
+		// Strict same-sandbox rule (review round 2): BOTH sandboxes must be
+		// known and equal. An unknown sandbox is no evidence of the same
+		// train - inferring an update from it could badge a stable
+		// controller with a member's preview-build pointer.
+		if m.FWUpdateSandbox == "" || v.Sandbox == "" || m.FWUpdateSandbox != v.Sandbox {
+			continue
 		}
 		if compareNDMRelease(m.FWReleaseAvailable, bestRel) > 0 {
 			bestRel = m.FWReleaseAvailable

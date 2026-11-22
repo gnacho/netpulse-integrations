@@ -13,8 +13,11 @@
   update-check result (`fw-release-available`/`fw-available`/
   `fw-update-sandbox`). KeeneticOS releases move as one train per sandbox, so
   a pointer strictly newer than the controller's installed `release` (numeric
-  run compare — ".10." > ".8." — and same sandbox) means the controller is
-  updatable too; an equal pointer raises no badge.
+  run compare — ".10." > ".8.") means the controller is updatable too; BOTH
+  sandboxes must be known and equal — an unknown sandbox infers nothing — and
+  an equal pointer raises no badge. Known accepted limit (the badge is
+  informational, nothing acts on it): a controller model that left the train
+  (EOL) while a newer member model still moves would be badged too.
 - Pin the unit certificate by SPKI: `cert_fp` (supervisor entry and fleet
   config), `KEENETIC_CERT_FP` (single-unit env). A pinned handshake accepts
   only the configured key; a bad pin fails at configuration time. Mutually

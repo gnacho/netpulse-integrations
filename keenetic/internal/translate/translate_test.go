@@ -425,6 +425,11 @@ func TestWirelessUnknownAPKeepsEmptyBand(t *testing.T) {
 	if c.SignalDbm != -48 || c.Iface != "WifiMaster9/AccessPoint0" {
 		t.Fatalf("client = %+v", c)
 	}
+	// The radio side: the empty band must not aggregate into a nameless
+	// radio (review round 2).
+	if radios := RadiosFromAssociations(w.Clients); len(radios) != 0 {
+		t.Fatalf("radios = %+v, want none from an unknown band", radios)
+	}
 }
 
 func TestBridgeMACPicksTheLowestBridgeID(t *testing.T) {

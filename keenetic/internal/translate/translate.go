@@ -823,6 +823,12 @@ func Wireless(raw json.RawMessage, excludeMACs map[string]bool) *probe.WirelessD
 func RadiosFromAssociations(clients map[string]probe.WirelessClient) []probe.Radio {
 	byBand := map[string]int{}
 	for _, c := range clients {
+		if c.Band == "" {
+			// The unknown-AP client stays in the map (its signal and
+			// counters are real) - but it must not fabricate a nameless
+			// radio (review round 2).
+			continue
+		}
 		byBand[c.Band]++
 	}
 	bands := make([]string, 0, len(byBand))

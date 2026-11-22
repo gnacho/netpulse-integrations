@@ -637,11 +637,11 @@ func TestPollMemberTLSMemberClientInheritsSchemeAndPin(t *testing.T) {
 	poller := func(pinValue string) *Poller {
 		t.Helper()
 		p, err := New(Config{
-			Host:    ctrlSrv.URL,
-			User:    "u",
+			Host:     ctrlSrv.URL,
+			User:     "u",
 			Password: "p",
-			UnitMAC: "02:AD:EF:c1:80:8a",
-			CertFP:  pinValue,
+			UnitMAC:  "02:AD:EF:c1:80:8a",
+			CertFP:   pinValue,
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)

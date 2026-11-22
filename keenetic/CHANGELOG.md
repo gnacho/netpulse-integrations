@@ -10,6 +10,10 @@
 - The backhaul medium is set only from recognized evidence: `rssi` says
   wifi, `speed`/`duplex` say cable, and an absent or unrecognizable backhaul
   object now stays empty instead of inventing "cable".
+- A temporary rejection of the authentication POST is retryable again: only
+  401/403 are the credential verdict (terminal); 429 and 5xx fail the cycle
+  like any transient network error instead of letting the supervisor disable
+  the unit.
 - The controller unit now reports its own pending firmware update. LIVE
   (2026-11-21): the controller gives itself no `fw-available` anywhere in the
   show tree — but every `show/mws/member` entry echoes the controller's own

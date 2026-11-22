@@ -63,7 +63,10 @@ address for its lifetime, and the KeeneticOS session (a 300-second sliding
 window that every request extends) stays open across cycles. A steady cycle
 authenticates once per router and then walks with the issued session cookie;
 when the router closes the session anyway (idle gap, reboot), the next 401
-re-authenticates once, transparently.
+re-authenticates once, transparently. A 401/403 on the authentication POST
+is the credential verdict (terminal - the supervisor disables the unit);
+any other status (429, 5xx) is a transient server condition that fails the
+cycle like a network error and is retried.
 
 **Single-unit mode** (one slug per process) keeps the shared
 `NETPULSE_*`/`KEENETIC_*` environment contract and is what the integrations

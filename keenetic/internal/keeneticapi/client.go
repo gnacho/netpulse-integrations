@@ -342,7 +342,18 @@ func (c *Client) authenticate(ctx context.Context) error {
 	defer res2.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(res2.Body, 4096))
 	if res2.StatusCode != http.StatusOK {
-		return &AuthError{Detail: fmt.Sprintf("HTTP %d", res2.StatusCode)}
+		// 401/403 are the credential verdict: the derived key was rejected.
+		// Retrying with the same secret cannot succeed - terminal.
+		if res2.StatusCode == http.StatusUnauthorized || res2.StatusCode == http.StatusForbidden {
+			return &AuthError{Detail: fmt.Sprintf("HTTP %d", res2.StatusCode)}
+		}
+		// Anything else - a 5xx under load, 429 rate limiting, an
+		// unexpected 4xx from a firmware that changed the endpoint - is a
+		// transient server condition, not credential evidence: a plain
+		// error keeps the unit retryable next cycle instead of the
+		// supervisor disabling it (review round 2: 429 explicitly
+		// retryable).
+		return fmt.Errorf("auth submit: HTTP %d", res2.StatusCode)
 	}
 	return nil
 }

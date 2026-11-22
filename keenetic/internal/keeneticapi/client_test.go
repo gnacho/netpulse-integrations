@@ -29,6 +29,9 @@ type fakeRouter struct {
 	authFailures int
 	// rejectAuth forces every POST /auth to answer 401 (terminal-error test).
 	rejectAuth bool
+	// authStatus forces every POST /auth to answer this status when set
+	// (the transient-vs-terminal status matrix test).
+	authStatus int
 	// rcCalls counts authenticated /rci requests (auth calls excluded).
 	rcCalls int
 	// authCalls counts GET /auth handshakes.
@@ -71,6 +74,10 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 			if f.rejectAuth {
 				f.authFailures++
 				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if f.authStatus != 0 {
+				w.WriteHeader(f.authStatus)
 				return
 			}
 			if body.Password != authKey(body.Login, f.password, f.realm, f.challenge) {
@@ -188,6 +195,44 @@ func TestWrongPasswordIsTerminal(t *testing.T) {
 	}
 	if f.authFailures != 1 {
 		t.Fatalf("rejected auth attempts = %d, want 1 (no brute-force hammering)", f.authFailures)
+	}
+}
+
+// TestAuthSubmitTransientStatuses pins the round-2 decision: 401/403 are
+// the credential verdict (terminal AuthError), every other status - a 5xx
+// under load, 429 rate limiting - is a transient server condition the
+// poller retries next cycle; an AuthError here would have the supervisor
+// disable the unit over one busy second.
+func TestAuthSubmitTransientStatuses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+	} {
+		f := newFakeRouter(t)
+		f.authStatus = status
+		c := clientFor(t, f)
+		_, err := c.Get(context.Background(), "show/system")
+		var authErr *AuthError
+		if err == nil {
+			t.Fatalf("HTTP %d produced no error", status)
+		}
+		if errors.As(err, &authErr) {
+			t.Fatalf("HTTP %d became AuthError: %v", status, err)
+		}
+	}
+}
+
+func TestAuthSubmitForbiddenIsTerminal(t *testing.T) {
+	// 403 is the credential verdict like 401: terminal.
+	f := newFakeRouter(t)
+	f.authStatus = http.StatusForbidden
+	c := clientFor(t, f)
+	_, err := c.Get(context.Background(), "show/system")
+	var authErr *AuthError
+	if !errors.As(err, &authErr) || !authErr.Terminal() {
+		t.Fatalf("err = %v, want a terminal AuthError", err)
 	}
 }
 

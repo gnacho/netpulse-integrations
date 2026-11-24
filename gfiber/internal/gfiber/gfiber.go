@@ -37,6 +37,12 @@ type Config struct {
 	// re-read on every poll so a refreshed session is picked up without a
 	// restart. Empty means send no cookies (tests).
 	CookieFile string
+	// RouterMAC is the gateway's own bridge MAC (br-lan). The cloud portal
+	// never returns it — only the extender RPCs and the local box API carry
+	// MACs — so it is supplied from a LAN witness (arp/neigh of the router
+	// IP). It feeds SystemData.BridgeMAC, which the server uses for uplink
+	// and topology attribution; empty simply omits it.
+	RouterMAC string
 	// HTTPClient is optional (tests).
 	HTTPClient *http.Client
 }
@@ -104,6 +110,23 @@ type alertsResp struct {
 	Alerts        []json.RawMessage `json:"alerts"`
 }
 
+// deviceTopoResp is the primary-tab device census: connected + disconnected
+// known devices, each with MAC, addresses, nickname and a connection type
+// enum (TYPE_WIRED, TYPE_WIRELESS_{2_4,5,6}_GHZ, TYPE_UNKNOWN_TYPE).
+type deviceTopoResp struct {
+	Primary struct {
+		Connected    []deviceTopoEntry `json:"connectedDevicesTopology"`
+		Disconnected []deviceTopoEntry `json:"disconnectedDevicesTopology"`
+	} `json:"primaryUserDevicesTopology"`
+}
+
+type deviceTopoEntry struct {
+	MAC            string `json:"macAddr"`
+	IP             string `json:"ipAddr4"`
+	Nickname       string `json:"nickname"`
+	ConnectionType string `json:"connectionType"`
+}
+
 // ---- client ----
 
 func (p *Poller) cookieHeader() (string, error) {
@@ -149,6 +172,74 @@ func (p *Poller) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// portalBand maps the portal's connection enum to the band strings the
+// contract uses ("2.4 GHz"|"5 GHz"|"6 GHz"); "" means wired or unknown.
+func portalBand(t string) string {
+	switch t {
+	case "TYPE_WIRELESS_2_4_GHZ":
+		return "2.4 GHz"
+	case "TYPE_WIRELESS_5_GHZ":
+		return "5 GHz"
+	case "TYPE_WIRELESS_6_GHZ":
+		return "6 GHz"
+	}
+	return ""
+}
+
+// applyDeviceTopology feeds the client-bearing sections from the portal's
+// device census, staying true to each section's meaning:
+//   - FDB.Macs is the client-list backbone (every connected device is
+//     bridged on the gateway); the appliance exposes no port names, so the
+//     single bridged segment is reported as "lan".
+//   - FDB.WirelessSide is exactly the portal's connectionType: Wi-Fi
+//     stations carry their band so the server does not draw them wired.
+//   - DHCP leases carry the names (connected and remembered devices); ARP
+//     only the connected MAC→IP pairs the gateway currently resolves.
+//
+// The portal reports no per-station signal and no lease expiry, so those
+// stay zero/nil instead of being invented.
+func applyDeviceTopology(data *probe.PayloadData, tp *deviceTopoResp) {
+	leases := make([]probe.DhcpLease, 0, len(tp.Primary.Connected)+len(tp.Primary.Disconnected))
+	fdbMacs := make(map[string]string, len(tp.Primary.Connected))
+	wirelessSide := make(map[string]string)
+	arp := make(map[string]string)
+
+	for _, set := range []struct {
+		devs      []deviceTopoEntry
+		connected bool
+	}{{tp.Primary.Connected, true}, {tp.Primary.Disconnected, false}} {
+		for _, d := range set.devs {
+			mac := strings.ToUpper(strings.TrimSpace(d.MAC))
+			if mac == "" {
+				continue
+			}
+			hostname := d.Nickname
+			if hostname == "" || strings.EqualFold(hostname, d.MAC) {
+				hostname = "" // unnamed: MAC-as-nickname adds no signal
+			}
+			leases = append(leases, probe.DhcpLease{MAC: mac, IP: d.IP, Hostname: hostname})
+			if !set.connected {
+				continue
+			}
+			if d.IP != "" {
+				arp[mac] = d.IP
+			}
+			fdbMacs[mac] = "lan"
+			if band := portalBand(d.ConnectionType); band != "" {
+				wirelessSide[mac] = band
+			}
+		}
+	}
+
+	data.FDB = &probe.FDBData{MACs: fdbMacs, WirelessSide: wirelessSide}
+	if len(leases) > 0 {
+		data.DHCP = &probe.DHCPData{Leases: leases}
+	}
+	if len(arp) > 0 {
+		data.Arp = arp
+	}
+}
+
 // Poll collects one coherent snapshot. The overview is required (a failed
 // poll leaves the server on its last-good data); the static preload board
 // model and the alert pass are best-effort.
@@ -158,6 +249,9 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 		return nil, err
 	}
 	data := &probe.PayloadData{System: &probe.SystemData{}}
+	if mac := strings.TrimSpace(p.cfg.RouterMAC); mac != "" {
+		data.System.BridgeMAC = strings.ToUpper(mac)
+	}
 	if ri := ov.BasicRouterInfo; ri != nil {
 		if ri.RouterBasic.LastRebootTimeMs > 0 {
 			up := time.Since(time.UnixMilli(ri.RouterBasic.LastRebootTimeMs)).Seconds()
@@ -182,6 +276,12 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	} else if n := len(al.UrgentAlerts) + len(al.WarningAlerts) + len(al.Alerts); n > 0 {
 		p.log.Warn("gfiber: portal reports alerts", "count", n,
 			"status", ov.NetworkStatusText)
+	}
+	var tp deviceTopoResp
+	if err := p.get(ctx, "network-mgt/v2/portal/api/v1/getuserdevicestopology", &tp); err != nil {
+		p.log.Warn("gfiber: device census unavailable", "err", err)
+	} else {
+		applyDeviceTopology(data, &tp)
 	}
 	return data, nil
 }

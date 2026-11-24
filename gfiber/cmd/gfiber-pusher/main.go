@@ -25,6 +25,7 @@ func run(ctx context.Context) error {
 	poller := gfiber.New(gfiber.Config{
 		BaseURL:    os.Getenv("GFIBER_BASE_URL"),
 		CookieFile: cookieFile,
+		RouterMAC:  os.Getenv("GFIBER_ROUTER_MAC"),
 	})
 	return pusher.Run(ctx, cfg, pusher.FromData(poller.Poll))
 }

@@ -29,6 +29,7 @@ func fixtureServer(t *testing.T) *httptest.Server {
 	serve("/network-mgt/v2/portal/api/v1/getnetworkoverview", "overview.json")
 	serve("/account/v2/portal/api/v1/getaccountpreloaddata", "preload.json")
 	serve("/alert/v2/portal/api/v1/getallalerts", "alerts.json")
+	serve("/network-mgt/v2/portal/api/v1/getuserdevicestopology", "topology.json")
 	return httptest.NewServer(mux)
 }
 
@@ -52,8 +53,22 @@ func TestPollOverviewFixture(t *testing.T) {
 	if data.System.FirmwareAvailable != "" {
 		t.Fatalf("fixture has no update in progress, got %q", data.System.FirmwareAvailable)
 	}
-	if data.Wireless != nil || data.Arp != nil || data.DHCP != nil {
-		t.Fatal("pusher must not fabricate sections the portal cannot feed")
+	if data.FDB == nil || len(data.FDB.MACs) != 59 {
+		t.Fatalf("FDB must carry the 59 connected devices: %+v", data.FDB)
+	}
+	if n := len(data.FDB.WirelessSide); n != 55 {
+		t.Fatalf("wireless-side band hints: want 55 (26x5G+20x2.4G+9x6G), got %d", n)
+	}
+	if data.DHCP == nil || len(data.DHCP.Leases) != 60 {
+		t.Fatalf("leases must cover connected+remembered (60): %+v", data.DHCP)
+	}
+	if data.Arp == nil || len(data.Arp) != 59 {
+		t.Fatalf("arp must carry connected MAC→IP: %+v", data.Arp)
+	}
+	for _, l := range data.DHCP.Leases {
+		if l.MAC != strings.ToUpper(l.MAC) {
+			t.Fatalf("lease MAC not uppercase: %q", l.MAC)
+		}
 	}
 	// The wire JSON must not leak portal secrets.
 	b, _ := json.Marshal(data)

@@ -1,0 +1,55 @@
+{
+ "networkStatusText": "Your internet\u2019s up and running, and your wireless network is active.",
+ "basicOntInfo": {
+  "internetComponentStatus": "GREEN"
+ },
+ "basicRouterInfo": {
+  "routerComponentStatus": "GREEN",
+  "routerBasic": {
+   "isSsidSplit": false,
+   "ssid": "TESTSSID",
+   "wirelessPassword": "TESTPASS",
+   "isWifiOn": true,
+   "guestWifiSupported": true,
+   "guestWifiEnabled": true,
+   "guestWifiSsid": "TESTGUEST",
+   "guestWifiPassword": "TESTPASS",
+   "bridgeModeEnabled": false,
+   "routerType": "GFIBER_ROUTER",
+   "firmwareUpdateInProgress": false,
+   "is6ghzSupported": true,
+   "lastRebootTimeMs": 1794606188000
+  }
+ },
+ "basicExtendersInfo": {
+  "extenderComponentStatus": "YELLOW",
+  "extenderTopology": [
+   {
+    "extenderBasic": {
+     "extenderSignalStrength": "SIGNAL_TOO_CLOSE",
+     "firmwareUpdateInProgress": false,
+     "lastUpdateTimeMs": 1795527031949
+    }
+   },
+   {
+    "extenderBasic": {
+     "extenderSignalStrength": "SIGNAL_OK",
+     "firmwareUpdateInProgress": false,
+     "lastUpdateTimeMs": 1795527032188
+    }
+   }
+  ],
+  "totalExtendersNum": 2
+ },
+ "basicUserdevicesInfo": {
+  "userDeviceComponentStatus": "GREEN",
+  "totalDevicesNum": 60,
+  "totalDevicesConnected": 58
+ },
+ "guestNetworkCardStatus": "ENABLED",
+ "isSpeedCardVisible": true,
+ "accountState": {
+  "accountState": "ACTIVE"
+ },
+ "isPrimaryNetworkCardVisible": true
+}

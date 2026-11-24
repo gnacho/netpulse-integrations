@@ -1,0 +1,58 @@
+{
+ "extenderComponentStatus": "GREEN",
+ "extenderTopology": [
+  {
+   "extenderBasic": {
+    "extenderSignalStrength": "SIGNAL_OK",
+    "firmwareUpdateInProgress": false,
+    "lastUpdateTimeMs": 1795526423559
+   },
+   "extenderDetailed": {
+    "connectionType": "TYPE_WIRELESS_5_GHZ",
+    "model": "GEBE320C",
+    "serialNumber": "E01C1M253900NNP",
+    "ipAddr4": "192.168.1.128",
+    "ipAddr6": "2605:a601:a6eb:2000:2bc:2fff:fe1d:db80",
+    "macAddr": "00:bc:2f:1d:db:80",
+    "softwareVersion": "1.1.6",
+    "nickname": "kitchen",
+    "makeName": "GFiber Wi-Fi 7 Mesh Extender",
+    "deviceIcon": "//images.ctfassets.net/epii4pwfyrqz/6rgIEJACNODebyL76xlujz/6cf049d7da9e1c8ff63df6dc3df5333e/wifi7extender_312x184.png",
+    "extenderConnectionStatus": "EXTENDER_CONNECTED_WIRELESS",
+    "extenderSignalStrengthIcon": "//www.gstatic.com/fiberportal/images/extender_signal_icons/extender_signal_ok.svg",
+    "extenderSignalStrengthDesc": [
+     "The extender is correctly positioned to expand your network's Wi-Fi coverage throughout your home.",
+     "Wait 5 minutes and refresh this screen to see the updated status."
+    ],
+    "connectionTypeStr": "Wireless (5 GHz)"
+   }
+  },
+  {
+   "extenderBasic": {
+    "extenderSignalStrength": "SIGNAL_OK",
+    "firmwareUpdateInProgress": false,
+    "lastUpdateTimeMs": 1795526423558
+   },
+   "extenderDetailed": {
+    "connectionType": "TYPE_WIRELESS_5_GHZ",
+    "model": "GEBE320C",
+    "serialNumber": "E01C1M253900NRP",
+    "ipAddr4": "192.168.1.241",
+    "ipAddr6": "",
+    "macAddr": "00:bc:2f:1d:e1:c0",
+    "softwareVersion": "1.1.6",
+    "nickname": "upstairs",
+    "makeName": "GFiber Wi-Fi 7 Mesh Extender",
+    "deviceIcon": "//images.ctfassets.net/epii4pwfyrqz/6rgIEJACNODebyL76xlujz/6cf049d7da9e1c8ff63df6dc3df5333e/wifi7extender_312x184.png",
+    "extenderConnectionStatus": "EXTENDER_CONNECTED_WIRELESS",
+    "extenderSignalStrengthIcon": "//www.gstatic.com/fiberportal/images/extender_signal_icons/extender_signal_ok.svg",
+    "extenderSignalStrengthDesc": [
+     "The extender is correctly positioned to expand your network's Wi-Fi coverage throughout your home.",
+     "Wait 5 minutes and refresh this screen to see the updated status."
+    ],
+    "connectionTypeStr": "Wireless (5 GHz)"
+   }
+  }
+ ],
+ "totalExtendersNum": 2
+}

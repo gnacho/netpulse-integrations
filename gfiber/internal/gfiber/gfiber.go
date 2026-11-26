@@ -43,15 +43,26 @@ type Config struct {
 	// IP). It feeds SystemData.BridgeMAC, which the server uses for uplink
 	// and topology attribution; empty simply omits it.
 	RouterMAC string
+	// ExtenderClients maps an extender row slug to the MACs physically
+	// behind that unit. The cloud census only says TYPE_WIRED and never
+	// WHICH extender a client rides (the extenders expose no local API),
+	// so attribution is operator knowledge, supplied as config. The
+	// pusher uses it two ways: the gateway FDB puts each mapped MAC on an
+	// extender-specific port (the server then names the multi-MAC dist
+	// node after the agent row whose FDB contains them all), and each
+	// extender row pushes those MACs as its own FDB. Unmapped clients
+	// keep the aggregate "lan" port — an honest unknown.
+	ExtenderClients map[string][]string
 	// HTTPClient is optional (tests).
 	HTTPClient *http.Client
 }
 
 type Poller struct {
-	base string
-	cfg  Config
-	http *http.Client
-	log  *slog.Logger
+	base  string
+	cfg   Config
+	http  *http.Client
+	log   *slog.Logger
+	units []Unit // last successful extender decode, for per-row pushes
 }
 
 func New(cfg Config, loggers ...*slog.Logger) *Poller {
@@ -126,6 +137,51 @@ type deviceTopoEntry struct {
 	Nickname       string `json:"nickname"`
 	ConnectionType string `json:"connectionType"`
 }
+
+// extenderTopoResp is the mesh-extender roster. Each unit becomes its own
+// NetPulse fleet row (the portal's aggregate FDB cannot say WHICH extender a
+// client rides behind, so the honest model is one row per physical unit —
+// ghost-free by construction). Only the fields the row needs are decoded.
+type extenderTopoResp struct {
+	ExtenderComponentStatus string          `json:"extenderComponentStatus"`
+	TotalExtendersNum       int             `json:"totalExtendersNum"`
+	ExtenderTopology        []extenderEntry `json:"extenderTopology"`
+}
+
+type extenderEntry struct {
+	Basic struct {
+		ExtenderSignalStrength   string `json:"extenderSignalStrength"`
+		FirmwareUpdateInProgress bool   `json:"firmwareUpdateInProgress"`
+		LastUpdateTimeMs         int64  `json:"lastUpdateTimeMs"`
+	} `json:"extenderBasic"`
+	Detailed struct {
+		ConnectionType           string `json:"connectionType"`
+		Model                    string `json:"model"`
+		SerialNumber             string `json:"serialNumber"`
+		IPAddr4                  string `json:"ipAddr4"`
+		MACAddr                  string `json:"macAddr"`
+		SoftwareVersion          string `json:"softwareVersion"`
+		Nickname                 string `json:"nickname"`
+		MakeName                 string `json:"makeName"`
+		ExtenderConnectionStatus string `json:"extenderConnectionStatus"`
+	} `json:"extenderDetailed"`
+}
+
+// Unit is one extender rendered as a standalone fleet payload. Slug is
+// "gfiber-" + nickname (lowercased, spaces to dashes); the delivery token for
+// each slug is supplied by the caller (one agent token per row on the server).
+type Unit struct {
+	Slug     string
+	Nickname string
+	MAC      string
+	Backhaul string   // "wifi" | "cable" | "" (unknown)
+	Clients  []string // attributed client MACs (operator config), uppercase
+	Payload  probe.PayloadData
+}
+
+// Units returns the extender rows from the most recent successful Poll
+// (nil until the first poll has decoded the roster).
+func (p *Poller) Units() []Unit { return p.units }
 
 // ---- client ----
 
@@ -337,7 +393,85 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 	} else {
 		applyDeviceTopology(data, &tp)
 	}
+	var et extenderTopoResp
+	if err := p.get(ctx, "network-mgt/v2/portal/api/v1/getextenderstopology", &et); err != nil {
+		p.log.Warn("gfiber: extender roster unavailable", "err", err)
+	} else {
+		p.units = p.buildUnits(&et)
+	}
+	// Attribute configured extender clients on the gateway FDB: a wired
+	// MAC behind unit X moves to an extender-specific port, which the
+	// server renders as a dist node NAMED after that unit's agent row
+	// (its FDB contains the same MACs). Unmapped clients stay "lan".
+	if data.FDB != nil {
+		for _, u := range p.units {
+			for _, mac := range u.Clients {
+				if port, ok := data.FDB.MACs[mac]; ok && port == "lan" {
+					data.FDB.MACs[mac] = extenderPort(u.Slug)
+				}
+			}
+		}
+	}
 	return data, nil
+}
+
+// extenderPort names the gateway FDB port standing for one extender unit.
+func extenderPort(slug string) string { return "ext-" + strings.TrimPrefix(slug, "gfiber-") }
+
+// buildUnits renders each portal extender as a standalone row payload. The
+// portal reports firmware only as an in-progress boolean — same label the
+// gateway row uses. Software version has no neutral contract home for
+// external pushers, so it stays in the portal (contract-gap note on file).
+// Configured clients (Config.ExtenderClients) ride along as the row's FDB;
+// a MAC claimed by two units keeps the first roster entry.
+func (p *Poller) buildUnits(et *extenderTopoResp) []Unit {
+	claimed := map[string]bool{}
+	units := make([]Unit, 0, len(et.ExtenderTopology))
+	for _, e := range et.ExtenderTopology {
+		nick := strings.TrimSpace(e.Detailed.Nickname)
+		if nick == "" {
+			continue // no honest slug without a nickname
+		}
+		u := Unit{
+			Slug:     "gfiber-" + strings.ToLower(strings.ReplaceAll(nick, " ", "-")),
+			Nickname: nick,
+			MAC:      strings.ToUpper(strings.TrimSpace(e.Detailed.MACAddr)),
+		}
+		for _, mac := range p.cfg.ExtenderClients[u.Slug] {
+			mac = strings.ToUpper(strings.TrimSpace(mac))
+			if mac == "" || claimed[mac] {
+				continue
+			}
+			claimed[mac] = true
+			u.Clients = append(u.Clients, mac)
+		}
+		switch e.Detailed.ConnectionType {
+		case "TYPE_WIRED":
+			u.Backhaul = "cable"
+		case "TYPE_WIRELESS_2_4_GHZ", "TYPE_WIRELESS_5_GHZ", "TYPE_WIRELESS_6_GHZ":
+			u.Backhaul = "wifi"
+		}
+		sys := &probe.SystemData{Backhaul: u.Backhaul}
+		if u.MAC != "" {
+			sys.BridgeMAC = u.MAC
+		}
+		if e.Detailed.Model != "" || e.Detailed.MakeName != "" {
+			sys.Board = &probe.BoardInfo{Model: e.Detailed.Model, Hostname: nick, System: e.Detailed.MakeName}
+		}
+		if e.Basic.FirmwareUpdateInProgress {
+			sys.FirmwareAvailable = "update-in-progress"
+		}
+		u.Payload = probe.PayloadData{System: sys}
+		if len(u.Clients) > 0 {
+			fdb := make(map[string]string, len(u.Clients))
+			for _, mac := range u.Clients {
+				fdb[mac] = "lan"
+			}
+			u.Payload.FDB = &probe.FDBData{MACs: fdb}
+		}
+		units = append(units, u)
+	}
+	return units
 }
 
 // Close implements the supervisor poller contract.

@@ -30,6 +30,7 @@ func fixtureServer(t *testing.T) *httptest.Server {
 	serve("/account/v2/portal/api/v1/getaccountpreloaddata", "preload.json")
 	serve("/alert/v2/portal/api/v1/getallalerts", "alerts.json")
 	serve("/network-mgt/v2/portal/api/v1/getuserdevicestopology", "topology.json")
+	serve("/network-mgt/v2/portal/api/v1/getextenderstopology", "extenders.json")
 	return httptest.NewServer(mux)
 }
 
@@ -151,5 +152,78 @@ func TestExpiredResponseDoesNotRotateJar(t *testing.T) {
 	b, _ := os.ReadFile(file)
 	if string(b) != "a=1" {
 		t.Fatalf("401 must not rotate the jar: %q", b)
+	}
+}
+
+func TestExtenderRosterBecomesRows(t *testing.T) {
+	srv := fixtureServer(t)
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL})
+	if _, err := p.Poll(context.Background()); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	units := p.Units()
+	if len(units) != 2 {
+		t.Fatalf("want 2 extender rows, got %d", len(units))
+	}
+	want := map[string]string{"gfiber-kitchen": "00:BC:2F:1D:DB:80", "gfiber-upstairs": "00:BC:2F:1D:E1:C0"}
+	for _, u := range units {
+		mac, ok := want[u.Slug]
+		if !ok {
+			t.Fatalf("unexpected slug %q", u.Slug)
+		}
+		if u.MAC != mac {
+			t.Fatalf("%s bridge MAC: want %s got %s", u.Slug, mac, u.MAC)
+		}
+		if u.Payload.System == nil || u.Payload.System.BridgeMAC != mac {
+			t.Fatalf("%s payload bridge MAC: %+v", u.Slug, u.Payload.System)
+		}
+		if u.Backhaul != "wifi" {
+			t.Fatalf("%s backhaul: want wifi got %q", u.Slug, u.Backhaul)
+		}
+		if u.Payload.System.Board == nil || u.Payload.System.Board.Hostname != u.Nickname {
+			t.Fatalf("%s board hostname: %+v", u.Slug, u.Payload.System.Board)
+		}
+	}
+}
+
+// The wiring map is the only source of behind-extender truth (the cloud
+// census says TYPE_WIRED and nothing more): it must move wired MACs to
+// per-extender gateway ports and ride along as each row's own FDB, or the
+// server collapses every wired client into one nameless ghost dist node.
+func TestExtenderClientAttribution(t *testing.T) {
+	srv := fixtureServer(t)
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, ExtenderClients: map[string][]string{
+		"gfiber-kitchen":  {"24:4b:fe:5d:1c:25", "00:17:88:75:8B:7C"}, // lowercase survives normalization
+		"gfiber-upstairs": {"BC:89:C1:DB:B3:00"},
+		"gfiber-ghost":    {"30:52:53:03:A6:C0"}, // slug not in the roster: no claim, stays "lan"
+	}})
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	want := map[string]string{
+		"24:4B:FE:5D:1C:25": "ext-kitchen",
+		"00:17:88:75:8B:7C": "ext-kitchen",
+		"BC:89:C1:DB:B3:00": "ext-upstairs",
+		"30:52:53:03:A6:C0": "lan",
+	}
+	for mac, port := range want {
+		if got := data.FDB.MACs[mac]; got != port {
+			t.Errorf("gateway FDB %s: want port %q got %q", mac, port, got)
+		}
+	}
+	for _, u := range p.Units() {
+		switch u.Slug {
+		case "gfiber-kitchen":
+			if u.Payload.FDB == nil || len(u.Payload.FDB.MACs) != 2 {
+				t.Errorf("kitchen row FDB: %+v", u.Payload.FDB)
+			}
+		case "gfiber-upstairs":
+			if u.Payload.FDB == nil || u.Payload.FDB.MACs["BC:89:C1:DB:B3:00"] != "lan" {
+				t.Errorf("upstairs row FDB: %+v", u.Payload.FDB)
+			}
+		}
 	}
 }

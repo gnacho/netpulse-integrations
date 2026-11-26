@@ -99,3 +99,57 @@ func TestUnauthorizedIsSessionExpired(t *testing.T) {
 		t.Fatalf("want session-expired error, got %v", err)
 	}
 }
+
+func TestCookieRotationPersists(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "cookies")
+	if err := os.WriteFile(file, []byte("a=1; stale=keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("cookie") == "" {
+			t.Error("poller must send the jar")
+		}
+		http.SetCookie(w, &http.Cookie{Name: "__session__0", Value: "ROTATED"})
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, CookieFile: file})
+	var out map[string]any
+	if err := p.get(context.Background(), "x/get", &out); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	b, _ := os.ReadFile(file)
+	got := string(b)
+	for _, want := range []string{"a=1", "stale=keep", "__session__0=ROTATED"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("jar lost %q: %s", want, got)
+		}
+	}
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("jar mode after rotation: %v %v", fi, err)
+	}
+}
+
+func TestExpiredResponseDoesNotRotateJar(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "cookies")
+	if err := os.WriteFile(file, []byte("a=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__session__0", Value: "GONE"})
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, CookieFile: file})
+	var out map[string]any
+	if err := p.get(context.Background(), "x/get", &out); err == nil {
+		t.Fatal("401 must error")
+	}
+	b, _ := os.ReadFile(file)
+	if string(b) != "a=1" {
+		t.Fatalf("401 must not rotate the jar: %q", b)
+	}
+}

@@ -140,6 +140,59 @@ func (p *Poller) cookieHeader() (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// persistCookies writes rotated session cookies back to the cookie file.
+// Auth0 slides the __session__ pair on portal responses; a jar that never
+// saves them falls behind rotation and dies with 401 inside a day (observed
+// live: exported jar dead in ~24h while a browser keeping the rotation ran
+// for days). Best-effort: on any write error the previous file stays in use,
+// and only successful responses rotate (a 401 must never overwrite a jar
+// that might still recover).
+func (p *Poller) persistCookies(res *http.Response) {
+	if p.cfg.CookieFile == "" || res.StatusCode < 200 || res.StatusCode >= 300 || len(res.Cookies()) == 0 {
+		return
+	}
+	old, err := p.cookieHeader()
+	if err != nil {
+		return
+	}
+	var order []string
+	vals := map[string]string{}
+	for _, kv := range strings.Split(old, ";") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, seen := vals[name]; !seen {
+			order = append(order, name)
+		}
+		vals[name] = value
+	}
+	for _, c := range res.Cookies() {
+		if _, seen := vals[c.Name]; !seen {
+			order = append(order, c.Name)
+		}
+		vals[c.Name] = c.Value
+	}
+	var sb strings.Builder
+	for _, name := range order {
+		if sb.Len() > 0 {
+			sb.WriteString("; ")
+		}
+		sb.WriteString(name)
+		sb.WriteByte('=')
+		sb.WriteString(vals[name])
+	}
+	tmp := p.cfg.CookieFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(sb.String()), 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, p.cfg.CookieFile)
+}
+
 func (p *Poller) get(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/"+strings.TrimPrefix(path, "/"), nil)
 	if err != nil {
@@ -156,6 +209,7 @@ func (p *Poller) get(ctx context.Context, path string, out any) error {
 		return fmt.Errorf("gfiber: %s: %w", path, err)
 	}
 	defer res.Body.Close()
+	p.persistCookies(res)
 	switch {
 	case res.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("gfiber: %s: session expired (401): re-run the one-time-code login and refresh the cookie file", path)

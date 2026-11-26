@@ -185,6 +185,68 @@ func (p *Poller) Units() []Unit { return p.units }
 
 // ---- client ----
 
+// parseCookieState reads the session file tolerantly. Two writers exist:
+// the pusher itself writes the raw Cookie header value ("a=b; c=d"), while
+// an operator debugging the session tends to point `curl -c` at the same
+// path and rewrite it as a Netscape jar (comment header, tab-separated
+// rows, optional "#HttpOnly_" name prefix). A raw read of a jar used to
+// stuff comment lines and newlines into the Cookie header
+// ("invalid header field value for \"Cookie\""), and a comments-only jar
+// (curl rewriting an already-empty engine) must send no cookies rather
+// than prose. Returns insertion order plus values, deduped by name.
+func parseCookieState(s string) (order []string, vals map[string]string) {
+	vals = map[string]string{}
+	seen := func(name string) {
+		if _, ok := vals[name]; !ok {
+			order = append(order, name)
+		}
+	}
+	if !strings.Contains(s, "	") {
+		for _, kv := range strings.Split(s, ";") {
+			kv = strings.TrimSpace(kv)
+			name, value, ok := strings.Cut(kv, "=")
+			if kv == "" || !ok || strings.HasPrefix(name, "#") {
+				continue
+			}
+			name = strings.TrimSpace(name)
+			seen(name)
+			vals[name] = strings.TrimSpace(value)
+		}
+		return order, vals
+	}
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.Trim(line, "\r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			// curl's own header comments are "# " prefixed; the only
+			// comment that is also a cookie is the #HttpOnly_ form.
+			if !strings.HasPrefix(line, "#HttpOnly_") {
+				continue
+			}
+		}
+		f := strings.Split(line, "	")
+		if len(f) < 7 {
+			continue
+		}
+		name := strings.TrimPrefix(f[5], "#HttpOnly_")
+		seen(name)
+		vals[name] = f[6]
+	}
+	return order, vals
+}
+
+func serializeCookies(order []string, vals map[string]string) string {
+	var sb strings.Builder
+	for _, name := range order {
+		if sb.Len() > 0 {
+			sb.WriteString("; ")
+		}
+		sb.WriteString(name)
+		sb.WriteByte('=')
+		sb.WriteString(vals[name])
+	}
+	return sb.String()
+}
+
 func (p *Poller) cookieHeader() (string, error) {
 	if p.cfg.CookieFile == "" {
 		return "", nil
@@ -193,7 +255,8 @@ func (p *Poller) cookieHeader() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gfiber: read session cookie file: %w", err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	order, vals := parseCookieState(string(b))
+	return serializeCookies(order, vals), nil
 }
 
 // persistCookies writes rotated session cookies back to the cookie file.
@@ -211,39 +274,15 @@ func (p *Poller) persistCookies(res *http.Response) {
 	if err != nil {
 		return
 	}
-	var order []string
-	vals := map[string]string{}
-	for _, kv := range strings.Split(old, ";") {
-		kv = strings.TrimSpace(kv)
-		if kv == "" {
-			continue
-		}
-		name, value, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		if _, seen := vals[name]; !seen {
-			order = append(order, name)
-		}
-		vals[name] = value
-	}
+	order, vals := parseCookieState(old)
 	for _, c := range res.Cookies() {
 		if _, seen := vals[c.Name]; !seen {
 			order = append(order, c.Name)
 		}
 		vals[c.Name] = c.Value
 	}
-	var sb strings.Builder
-	for _, name := range order {
-		if sb.Len() > 0 {
-			sb.WriteString("; ")
-		}
-		sb.WriteString(name)
-		sb.WriteByte('=')
-		sb.WriteString(vals[name])
-	}
 	tmp := p.cfg.CookieFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(sb.String()), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(serializeCookies(order, vals)), 0o600); err != nil {
 		return
 	}
 	_ = os.Rename(tmp, p.cfg.CookieFile)

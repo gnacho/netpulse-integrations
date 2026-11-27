@@ -53,6 +53,16 @@ type Config struct {
 	// extender row pushes those MACs as its own FDB. Unmapped clients
 	// keep the aggregate "lan" port — an honest unknown.
 	ExtenderClients map[string][]string
+	// SessionPingURL is the portal navigation surface that re-mints the
+	// session cookie pair. Measured live (2026-11-27): the JSON RPCs carry
+	// NO Set-Cookie at all, while GET/HEAD of the SPA document re-issues
+	// "__session__0/1" with a fresh Max-Age=86400 on every single load —
+	// that is how a browser session slides for days while a pure-RPC
+	// client dies at the original 24 h mint. The poller HEADs this URL
+	// once per cycle and persists the rotation, so the session never
+	// reaches expiry and death moves out to the Auth0 cookie lifetime.
+	// Empty disables the ping (tests).
+	SessionPingURL string
 	// HTTPClient is optional (tests).
 	HTTPClient *http.Client
 }
@@ -288,6 +298,31 @@ func (p *Poller) persistCookies(res *http.Response) {
 	_ = os.Rename(tmp, p.cfg.CookieFile)
 }
 
+// slideSession performs one portal-document HEAD and persists any rotated
+// cookies. Best-effort: a failed ping never fails the poll — the RPCs behind
+// it either still ride the current session or report the honest 401.
+func (p *Poller) slideSession(ctx context.Context) {
+	if p.cfg.SessionPingURL == "" {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, p.cfg.SessionPingURL, nil)
+	if err != nil {
+		return
+	}
+	if ck, err := p.cookieHeader(); err != nil || ck == "" {
+		return
+	} else {
+		req.Header.Set("cookie", ck)
+	}
+	res, err := p.http.Do(req)
+	if err != nil {
+		p.log.Warn("gfiber: session ping failed", "err", err)
+		return
+	}
+	defer res.Body.Close()
+	p.persistCookies(res)
+}
+
 func (p *Poller) get(ctx context.Context, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.base+"/"+strings.TrimPrefix(path, "/"), nil)
 	if err != nil {
@@ -393,6 +428,10 @@ func applyDeviceTopology(data *probe.PayloadData, tp *deviceTopoResp) {
 // poll leaves the server on its last-good data); the static preload board
 // model and the alert pass are best-effort.
 func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
+	// Slide the vendor session first: the SPA document re-mints the
+	// __session__ pair (the RPCs never do), so this is the only call in
+	// the cycle that keeps a pure-RPC client from dying at 24 h.
+	p.slideSession(ctx)
 	var ov overviewResp
 	if err := p.get(ctx, "network-mgt/v2/portal/api/v1/getnetworkoverview", &ov); err != nil {
 		return nil, err

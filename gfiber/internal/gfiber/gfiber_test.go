@@ -266,3 +266,73 @@ func TestCookieFileFormatTolerance(t *testing.T) {
 		t.Fatalf("comments-only jar must read as no cookies, got %q", h)
 	}
 }
+
+// The JSON RPCs never re-issue the session pair; only the SPA document
+// does (measured on the live portal). The per-poll ping must therefore
+// rotate the jar AND the RPCs that follow it must ride the rotated value
+// within the same cycle — all while the file stays a raw Cookie header.
+func TestSessionPingSlidesJar(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "cookies")
+	if err := os.WriteFile(file, []byte("auth0=x; __session__0=OLD"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var pingCookie, rpcCookie, pingMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/account" {
+			pingMethod, pingCookie = r.Method, r.Header.Get("cookie")
+			http.SetCookie(w, &http.Cookie{Name: "__session__0", Value: "SLID", Path: "/account", MaxAge: 86400})
+			return
+		}
+		if rpcCookie == "" && strings.HasPrefix(r.URL.Path, "/network-mgt/") {
+			rpcCookie = r.Header.Get("cookie")
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, CookieFile: file, SessionPingURL: srv.URL + "/account"})
+	if _, err := p.Poll(context.Background()); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	if pingMethod != http.MethodHead {
+		t.Fatalf("ping must be HEAD (zero body), got %q", pingMethod)
+	}
+	if !strings.Contains(pingCookie, "__session__0=OLD") {
+		t.Fatalf("ping must carry the current jar, got %q", pingCookie)
+	}
+	if !strings.Contains(rpcCookie, "__session__0=SLID") {
+		t.Fatalf("RPCs must ride the rotation from the ping, got %q", rpcCookie)
+	}
+	b, _ := os.ReadFile(file)
+	got := string(b)
+	if !strings.Contains(got, "__session__0=SLID") || !strings.Contains(got, "auth0=x") {
+		t.Fatalf("jar after slide: %q", got)
+	}
+	if strings.ContainsAny(got, "\n	") {
+		t.Fatalf("jar must stay a raw Cookie header value, got %q", got)
+	}
+}
+
+// A ping into a dead session may carry Set-Cookie (Auth0 loves to expire
+// what it rejects); it must never overwrite the jar, so the 401 that
+// follows still reports against the last-known-good session.
+func TestSessionPingFailureNeverPoisonsJar(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "cookies")
+	if err := os.WriteFile(file, []byte("a=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "__session__0", Value: "GONE"})
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, CookieFile: file, SessionPingURL: srv.URL + "/account"})
+	if _, err := p.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "session expired") {
+		t.Fatalf("want session-expired error, got %v", err)
+	}
+	if b, _ := os.ReadFile(file); string(b) != "a=1" {
+		t.Fatalf("401 ping must not rotate the jar: %q", b)
+	}
+}

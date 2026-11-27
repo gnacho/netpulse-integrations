@@ -14,7 +14,7 @@ import (
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
-var Version = "0.1.0"
+var Version = "0.2.0"
 
 func run(ctx context.Context) error {
 	cfg, err := pusher.ConfigFromEnv("gfiber-pusher", Version)
@@ -30,6 +30,7 @@ func run(ctx context.Context) error {
 		CookieFile:      cookieFile,
 		RouterMAC:       os.Getenv("GFIBER_ROUTER_MAC"),
 		ExtenderClients: parseClients(os.Getenv("GFIBER_EXTENDER_CLIENTS")),
+		SessionPingURL:  envOr("GFIBER_SESSION_PING_URL", "https://gfiber.com/account"),
 	})
 
 	// One portal poll feeds N fleet rows: the gateway (cfg.Slug/cfg.Token)
@@ -76,6 +77,18 @@ func run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// envOr reads an env var with a default. "none" disables a defaulted
+// setting (there is no way to distinguish unset from empty via the env).
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if v == "none" {
+			return ""
+		}
+		return v
+	}
+	return def
 }
 
 // normalize fills the shared envelope fields exactly like pusher.Run does.

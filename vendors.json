@@ -28,6 +28,15 @@
       "description": "Read-only pusher for Realtek RTL9303 switches (FN/希力威视 ODM family) over their web backend, with an optional CLI probe for the fan temperature"
     },
     {
+      "id": "gfiber",
+      "mode": "local",
+      "arches": ["amd64", "arm64"],
+      "tagPrefix": "gfiber/v",
+      "binary": "gfiber-pusher",
+      "target": "gfiber/cmd/gfiber-pusher",
+      "description": "Read-only Google Fiber (gFiber) portal pusher for hosts that hold a portal session: gateway board, uptime and firmware-in-progress from the dashboard RPCs"
+    },
+    {
       "id": "opnsense",
       "mode": "local",
       "arches": ["amd64", "arm64"],

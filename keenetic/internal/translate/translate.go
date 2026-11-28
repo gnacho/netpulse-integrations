@@ -960,20 +960,6 @@ func MergeRadios(fromAssoc, fromIfaces []probe.Radio) []probe.Radio {
 	return out
 }
 
-// normalizeBand maps the vendor band label to the NetPulse labels. The
-// spelling ("2.4GHz") is a fixture to confirm.
-func normalizeBand(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "2.4ghz", "2.4 ghz", "24":
-		return "2.4 GHz"
-	case "5ghz", "5 ghz", "5":
-		return "5 GHz"
-	case "6ghz", "6 ghz", "6":
-		return "6 GHz"
-	}
-	return ""
-}
-
 // Names maps show/ip/hotspot into name reservations: the user-assigned name,
 // falling back to the reported hostname, pinned to the MAC without an address
 // (the same rule as the UniFi integration: sending the IP would claim lease

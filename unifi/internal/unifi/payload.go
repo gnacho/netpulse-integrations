@@ -1,6 +1,7 @@
 package unifi
 
 import (
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -27,6 +28,52 @@ type rawDevice struct {
 	// relative to the WAN object, which is the reliable source.
 	Wan1 *rawWAN `json:"wan1"`
 	Wan2 *rawWAN `json:"wan2"`
+	// SystemStats and SysStats describe the appliance itself. On an access
+	// point they are the only source of CPU, uptime and memory: an AP-only
+	// site has no gateway to read them from (issue #91).
+	SystemStats *rawSystemStats `json:"system-stats"`
+	SysStats    *rawSysStats    `json:"sys_stats"`
+}
+
+// rawSystemStats is the system-stats block: CPU and memory percentages and
+// the uptime. The controller sends the figures as JSON strings ("cpu":"2.1"),
+// so they decode through flexFloat.
+type rawSystemStats struct {
+	CPU    flexFloat `json:"cpu"`
+	Mem    flexFloat `json:"mem"`
+	Uptime flexFloat `json:"uptime"`
+}
+
+// rawSysStats is the sys_stats block: memory in bytes and the load averages.
+// Controllers have sent the load figures both as strings and as numbers.
+type rawSysStats struct {
+	MemTotal  flexFloat `json:"mem_total"`
+	MemUsed   flexFloat `json:"mem_used"`
+	MemBuffer flexFloat `json:"mem_buffer"`
+	Load1     flexFloat `json:"loadavg_1"`
+	Load5     flexFloat `json:"loadavg_5"`
+	Load15    flexFloat `json:"loadavg_15"`
+}
+
+// flexFloat accepts a JSON number, a numeric string or null. A malformed value
+// stays 0 instead of failing the whole device list: one odd reading must not
+// cost the rest of the inventory.
+type flexFloat float64
+
+func (f *flexFloat) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" || s == `""` {
+		*f = 0
+		return nil
+	}
+	s = strings.Trim(s, `"`)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		*f = 0
+		return nil
+	}
+	*f = flexFloat(v)
+	return nil
 }
 
 // rawWAN is one internet connection of a gateway. Counters are cumulative
@@ -244,7 +291,8 @@ func portID(switchMAC string, portIdx int) string {
 
 // buildPayload translates the controller inventory into the neutral payload:
 // FDB ports and MAC attachments, wireless clients, ARP identities, client and
-// device names, and a minimal system section taken from the gateway.
+// device names, and a minimal system section taken from the gateway, or from
+// the single access point on a site that has none.
 func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 	data := &probe.PayloadData{}
 
@@ -352,41 +400,127 @@ func buildPayload(devs []rawDevice, cls []rawClient) *probe.PayloadData {
 		data.DHCP = &probe.DHCPData{Reservations: res}
 	}
 
-	for _, d := range devs {
-		if d.kind() != "gateway" {
-			continue
-		}
-		board := &probe.BoardInfo{Hostname: strings.TrimSpace(d.Name), System: "unifi"}
-		if model := strings.TrimSpace(d.Model); model != "" {
-			board.Model = model
-		}
-		if d.Version != "" {
-			board.Release.Version = d.Version
-			board.Release.Description = "UniFi " + d.Version
-		}
-		data.System = &probe.SystemData{
-			BridgeMAC: d.mac(),
-			SysInfo:   &probe.SysInfo{Uptime: float64(d.Uptime)},
-			Board:     board,
-		}
-		if w := d.activeWAN(); w != nil {
-			// The WAN rates are what the server shows as internet throughput
-			// (bits per second, rx = download).
-			data.System.RxBps = bitsPerSecond(w.RxRate)
-			data.System.TxBps = bitsPerSecond(w.TxRate)
-			if w.Latency > 0 {
-				lat := w.Latency
-				data.System.LatencyMs = &lat
+	// The unit described by the system section is the gateway when the site
+	// has one, and the single access point otherwise (issue #91). The WAN
+	// block only makes sense on a gateway.
+	if src := systemSource(devs); src != nil {
+		data.System = systemData(*src)
+		if src.kind() == "gateway" {
+			if w := src.activeWAN(); w != nil {
+				// The WAN rates are what the server shows as internet
+				// throughput (bits per second, rx = download).
+				data.System.RxBps = bitsPerSecond(w.RxRate)
+				data.System.TxBps = bitsPerSecond(w.TxRate)
+				if w.Latency > 0 {
+					lat := w.Latency
+					data.System.LatencyMs = &lat
+				}
+				info := &probe.WanInfo{IP: strings.TrimSpace(w.IP), Device: w.IfName, Port: w.IfName}
+				if src.Uplink != nil {
+					info.Gateway = firstIPv4(src.Uplink.Gateways)
+				}
+				data.Wan = info
 			}
-			info := &probe.WanInfo{IP: strings.TrimSpace(w.IP), Device: w.IfName, Port: w.IfName}
-			if d.Uplink != nil {
-				info.Gateway = firstIPv4(d.Uplink.Gateways)
-			}
-			data.Wan = info
 		}
-		break
 	}
 	return data
+}
+
+// systemSource returns the device whose readings describe the unit: the
+// gateway when the site has one, else the only access point. A site with
+// several APs and no gateway selects nothing rather than an arbitrary AP.
+func systemSource(devs []rawDevice) *rawDevice {
+	var ap *rawDevice
+	aps := 0
+	for i := range devs {
+		d := &devs[i]
+		switch d.kind() {
+		case "gateway":
+			return d
+		case "ap":
+			aps++
+			ap = d
+		}
+	}
+	if aps == 1 {
+		return ap
+	}
+	return nil
+}
+
+// systemData builds the system section from one device: board and firmware
+// from the inventory row, uptime from the top level or system-stats, CPU from
+// system-stats and memory from sys_stats. Temperature is never filled here:
+// the block only says whether the unit has a sensor, and the controller does
+// not report its value.
+func systemData(d rawDevice) *probe.SystemData {
+	board := &probe.BoardInfo{Hostname: strings.TrimSpace(d.Name), System: "unifi"}
+	if model := strings.TrimSpace(d.Model); model != "" {
+		board.Model = model
+	}
+	if d.Version != "" {
+		board.Release.Version = d.Version
+		board.Release.Description = "UniFi " + d.Version
+	}
+	sys := &probe.SystemData{
+		BridgeMAC: d.mac(),
+		SysInfo:   &probe.SysInfo{Uptime: float64(d.Uptime)},
+		Board:     board,
+	}
+	stats := d.SystemStats
+	if stats != nil && sys.SysInfo.Uptime <= 0 {
+		sys.SysInfo.Uptime = float64(stats.Uptime)
+	}
+	if stats != nil {
+		if cpu, ok := percentOf(stats.CPU); ok {
+			sys.CPU = &cpu
+		}
+	}
+	if d.SysStats == nil {
+		return sys
+	}
+	total := float64(d.SysStats.MemTotal)
+	if total <= 0 {
+		return sys
+	}
+	used := float64(d.SysStats.MemUsed)
+	if used <= 0 && stats != nil && stats.Mem > 0 {
+		// A controller that omits the byte counters still reports the
+		// percentage, which is enough to fill the used figure.
+		used = total * float64(stats.Mem) / 100
+	}
+	used = clampBytes(used, total)
+	mem := &sys.SysInfo.Memory
+	mem.Total = total
+	mem.Used = used
+	mem.Free = total - used
+	mem.Buffered = clampBytes(float64(d.SysStats.MemBuffer), mem.Free)
+	mem.Available = clampBytes(mem.Free+mem.Buffered, total)
+	return sys
+}
+
+// percentOf turns a controller percentage into the integer the payload uses,
+// capped at 100. A missing or non-positive reading has no value.
+func percentOf(v flexFloat) (int, bool) {
+	if v <= 0 {
+		return 0, false
+	}
+	n := int(math.Round(float64(v)))
+	if n > 100 {
+		n = 100
+	}
+	return n, true
+}
+
+// clampBytes keeps a byte figure inside [0, limit].
+func clampBytes(v, limit float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > limit {
+		return limit
+	}
+	return v
 }
 
 // speedLabel renders the negotiated port speed with the short unit the UI

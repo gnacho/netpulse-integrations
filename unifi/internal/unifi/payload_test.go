@@ -418,3 +418,107 @@ func TestClientBwEmptyListIsNotNil(t *testing.T) {
 		t.Errorf("json = %s, err %v", b, err)
 	}
 }
+
+// apOnlyJSON is one U7 access point on a site whose gateway is a third-party
+// router, shaped like the stat/device sample in issue #91. The figures arrive
+// as strings and the memory counters as numbers.
+const apOnlyJSON = `{
+  "mac": "70:a7:41:00:00:aa", "type": "uap", "model": "U7PRO", "name": "Office AP",
+  "version": "8.8.14.20179", "uptime": 483929,
+  "system-stats": {"cpu": "2.1", "mem": "39.5", "uptime": "483929"},
+  "sys_stats": {"loadavg_1": "1.00", "loadavg_5": "1.01", "loadavg_15": "1.00",
+                "mem_buffer": 78860288, "mem_total": 918241280, "mem_used": 362799104},
+  "has_temperature": false
+}`
+
+// A site with one UniFi AP and no UniFi gateway used to report no system
+// metrics at all. The single AP is now the source, and the WAN block stays
+// absent because the internet connection is not UniFi's.
+func TestAPOnlySiteReportsSystemMetrics(t *testing.T) {
+	data := buildPayload([]rawDevice{decodeDevice(t, apOnlyJSON)}, nil)
+	sys := data.System
+	if sys == nil {
+		t.Fatal("no system section for an AP-only site")
+	}
+	if sys.CPU == nil || *sys.CPU != 2 {
+		t.Errorf("cpu = %v, want 2 from the string figure", sys.CPU)
+	}
+	if sys.Temp != nil {
+		t.Errorf("temp = %v, want nil: the unit reports no temperature value", *sys.Temp)
+	}
+	if sys.SysInfo == nil || sys.SysInfo.Uptime != 483929 {
+		t.Errorf("uptime = %+v, want 483929", sys.SysInfo)
+	}
+	if sys.Board == nil || sys.Board.Model != "U7PRO" || sys.Board.Hostname != "Office AP" {
+		t.Errorf("board = %+v", sys.Board)
+	}
+	if sys.Board.Release.Version != "8.8.14.20179" || sys.Board.Release.Description != "UniFi 8.8.14.20179" {
+		t.Errorf("firmware = %+v", sys.Board.Release)
+	}
+	if sys.BridgeMAC != "70:A7:41:00:00:AA" {
+		t.Errorf("bridge mac = %q, want the AP mac", sys.BridgeMAC)
+	}
+	m := sys.SysInfo.Memory
+	if m.Total != 918241280 || m.Used != 362799104 {
+		t.Errorf("memory total/used = %v/%v", m.Total, m.Used)
+	}
+	if m.Free != m.Total-m.Used || m.Buffered != 78860288 {
+		t.Errorf("memory free/buffered = %v/%v", m.Free, m.Buffered)
+	}
+	if data.Wan != nil || sys.RxBps != nil || sys.LatencyMs != nil {
+		t.Errorf("wan or wan rates guessed on an AP-only site: %+v %+v", data.Wan, sys)
+	}
+}
+
+// Without a gateway, more than one AP is not a metrics source: picking one
+// would report an arbitrary unit as the site.
+func TestSeveralAPsWithoutGatewaySelectNoSource(t *testing.T) {
+	second := strings.Replace(apOnlyJSON, "70:a7:41:00:00:aa", "70:a7:41:00:00:bb", 1)
+	data := buildPayload([]rawDevice{decodeDevice(t, apOnlyJSON), decodeDevice(t, second)}, nil)
+	if data.System != nil {
+		t.Fatalf("system = %+v, want no source for two APs without a gateway", data.System)
+	}
+}
+
+// The gateway keeps winning whenever the site has one, with or without APs.
+func TestGatewayStaysTheSystemSource(t *testing.T) {
+	gw := decodeDevice(t, gatewayJSON)
+	ap := decodeDevice(t, apOnlyJSON)
+	data := buildPayload([]rawDevice{ap, gw}, nil)
+	if data.System == nil || data.System.BridgeMAC != "74:AC:B9:00:00:01" {
+		t.Fatalf("system = %+v, want the gateway as source", data.System)
+	}
+	if data.Wan == nil {
+		t.Error("wan section missing with a gateway present")
+	}
+}
+
+// A controller that omits the byte counters but still reports the memory
+// percentage gets the used figure derived from it, not a zero.
+func TestMemoryPercentageFillsUsedWhenCountersAreAbsent(t *testing.T) {
+	d := decodeDevice(t, `{"mac":"70:a7:41:00:00:aa","type":"uap","uptime":10,
+	  "system-stats":{"cpu":"7","mem":"40"},
+	  "sys_stats":{"mem_total":1000}}`)
+	sys := buildPayload([]rawDevice{d}, nil).System
+	if sys == nil || sys.CPU == nil || *sys.CPU != 7 {
+		t.Fatalf("system = %+v", sys)
+	}
+	if got := sys.SysInfo.Memory.Used; got != 400 {
+		t.Errorf("memory used = %v, want 400 from the 40%% reading", got)
+	}
+}
+
+// A malformed figure does not cost the device list: it stays zero and the rest
+// of the section is still reported.
+func TestMalformedSystemFiguresAreIgnored(t *testing.T) {
+	d := decodeDevice(t, `{"mac":"70:a7:41:00:00:aa","type":"uap","uptime":5,
+	  "system-stats":{"cpu":"n/a","mem":null},
+	  "sys_stats":{"mem_total":"918241280","mem_used":"362799104"}}`)
+	sys := buildPayload([]rawDevice{d}, nil).System
+	if sys == nil || sys.CPU != nil {
+		t.Fatalf("system = %+v, want no cpu from a malformed figure", sys)
+	}
+	if sys.SysInfo.Memory.Total != 918241280 || sys.SysInfo.Memory.Used != 362799104 {
+		t.Errorf("memory = %+v, want the numeric strings decoded", sys.SysInfo.Memory)
+	}
+}

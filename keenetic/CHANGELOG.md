@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7 - 2026-11-22
 
 - Mesh members inherit the controller's scheme and explicitly configured
   port, and the TLS pin covers every fleet unit: the member's management
@@ -14,17 +14,22 @@
   401/403 are the credential verdict (terminal); 429 and 5xx fail the cycle
   like any transient network error instead of letting the supervisor disable
   the unit.
+- The controller firmware badge now requires both sandboxes to be known and
+  equal: an unknown sandbox is no evidence of the same train and infers
+  nothing.
+
+## 0.1.6 - 2026-11-21
+
 - The controller unit now reports its own pending firmware update. LIVE
   (2026-11-21): the controller gives itself no `fw-available` anywhere in the
   show tree - but every `show/mws/member` entry echoes the controller's own
   update-check result (`fw-release-available`/`fw-available`/
   `fw-update-sandbox`). KeeneticOS releases move as one train per sandbox, so
   a pointer strictly newer than the controller's installed `release` (numeric
-  run compare - ".10." > ".8.") means the controller is updatable too; BOTH
-  sandboxes must be known and equal - an unknown sandbox infers nothing - and
-  an equal pointer raises no badge. Known accepted limit (the badge is
-  informational, nothing acts on it): a controller model that left the train
-  (EOL) while a newer member model still moves would be badged too.
+  run compare - ".10." > ".8.") on the same sandbox means the controller is
+  updatable too; an equal pointer raises no badge. Known accepted limit (the
+  badge is informational, nothing acts on it): a controller model that left
+  the train (EOL) while a newer member model still moves would be badged too.
 - Pin the unit certificate by SPKI: `cert_fp` (supervisor entry and fleet
   config), `KEENETIC_CERT_FP` (single-unit env). A pinned handshake accepts
   only the configured key; a bad pin fails at configuration time. Mutually

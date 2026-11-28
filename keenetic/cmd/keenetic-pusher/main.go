@@ -24,7 +24,7 @@ func run(ctx context.Context) error {
 	if path := strings.TrimSpace(os.Getenv("KEENETIC_CONFIG")); path != "" {
 		return runFleet(ctx, path)
 	}
-	// Single-unit shape: env settings, one slug — the form the shared
+	// Single-unit shape: env settings, one slug - the form the shared
 	// integrations supervisor consumes.
 	return runSingle(ctx)
 }

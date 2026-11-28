@@ -47,7 +47,7 @@ type fakeRCI struct {
 	// still fails, which is the AuthError the poller must not swallow).
 	deny map[string]bool
 	// valid is the cookie name whose POST /auth SUCCEEDED: the real router
-	// activates the session only then — the cookie issued at GET /auth does
+	// activates the session only then - the cookie issued at GET /auth does
 	// not authenticate /rci by itself.
 	valid string
 	// calls counts GET /rci/<path> hits per path (mesh-report sharing tests).
@@ -182,7 +182,7 @@ func TestPollControllerUnit(t *testing.T) {
 	}
 	// Wired clients of the controller itself, learned from the hotspot DB
 	// ("server" host carries top-level port "1"). A member-attached client
-	// must NOT land here — it belongs to that member's payload.
+	// must NOT land here - it belongs to that member's payload.
 	if data.FDB == nil || data.FDB.MACs == nil {
 		t.Fatal("controller payload must carry a fresh FDB section")
 	}
@@ -203,7 +203,7 @@ func TestPollControllerUnit(t *testing.T) {
 	if got := data.FDB.WirelessSide["02:AD:EF:C1:80:8A"]; got != "5 GHz" {
 		t.Fatalf("controller wirelessSide[child] = %q, want 5 GHz", got)
 	}
-	// The Giga's backhaul is WIRED (bridge falls back to the mesh root — not
+	// The Giga's backhaul is WIRED (bridge falls back to the mesh root - not
 	// evidence of attachment) and the chained Buddy belongs to the Giga's
 	// payload: neither may be claimed here.
 	for _, mac := range []string{"02:AD:EF:8E:BF:CB", "02:AD:EF:B7:1E:03"} {
@@ -329,7 +329,7 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 		t.Fatalf("extender client missing: %+v", data.Wireless.Clients)
 	}
 	// The extender answers no hotspot (404): no name reservations on this
-	// payload — names live on the controller's payload.
+	// payload - names live on the controller's payload.
 	if data.DHCP != nil && len(data.DHCP.Reservations) > 0 {
 		t.Fatalf("extender must not fabricate names: %+v", data.DHCP.Reservations)
 	}
@@ -351,8 +351,8 @@ func TestPollMeshMemberDirectly(t *testing.T) {
 
 // TestPollMemberDegradedToControllerFacts pins the documented degradation: a
 // member whose own RCI does not answer still reports what the controller
-// knows — the member report's health, firmware and backhaul, plus the
-// wired-client FDB from the controller's hotspot DB — while the controller's
+// knows - the member report's health, firmware and backhaul, plus the
+// wired-client FDB from the controller's hotspot DB - while the controller's
 // identity is never substituted for the member's.
 func TestPollMemberDegradedToControllerFacts(t *testing.T) {
 	controller := newFakeRCI(t, fixtureDir(t), false)

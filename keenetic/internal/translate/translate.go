@@ -3,14 +3,13 @@
 //
 // The mapping is intentionally conservative and fixture-driven: a value that
 // cannot be represented honestly is omitted (nil section, absent field), never
-// fabricated. Units follow the contract — bytes, dBm, Celsius, Unix seconds —
+// fabricated. Units follow the contract - bytes, dBm, Celsius, Unix seconds -
 // and vendor quirks (KiB memory pairs in the mesh report, band naming
 // differences between firmware branches) are normalised here.
 //
-// PROVISIONAL until live fixtures land (integration issue #1, plan §4): the
-// exact JSON shapes below come from public client implementations and the
-// vendor CLI reference. Every section carries a comment saying what a live
-// fixture must confirm before the mapping is considered final.
+// The JSON shapes below come from live fixtures captured on KeeneticOS 5.1.8
+// (testdata/): every section carries a comment saying what the live unit
+// confirmed and what remains provisional on branches not yet tested.
 package translate
 
 import (
@@ -194,7 +193,7 @@ type ifacesDoc map[string]ifaceDoc
 // show/system, which also carries it on firmware that keeps version minimal).
 //
 // LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): ndm carries no "version" field
-// and its "exact" is a build-only suffix ("0-d43bd79") — reporting either as
+// and its "exact" is a build-only suffix ("0-d43bd79") - reporting either as
 // the firmware version made NetPulse show the build hash as the installed
 // firmware. The honest version lives in title ("5.1.8") and, for a mesh
 // member, in the member report's "fw" field; the vendor release id
@@ -285,8 +284,8 @@ func releaseRuns(s string) []string {
 }
 
 // compareNDMRelease orders two release build ids ("5.01.C.8.0-2" vs
-// "5.01.C.10.0-0"): digit runs compare NUMERICALLY — plain string order
-// would claim ".8." > ".10." — letter runs lexicographically, and a shorter
+// "5.01.C.10.0-0"): digit runs compare NUMERICALLY - plain string order
+// would claim ".8." > ".10." - letter runs lexicographically, and a shorter
 // run list is older. -1 when a < b, 0 when equal, +1 when a > b.
 func compareNDMRelease(a, b string) int {
 	ra, rb := releaseRuns(a), releaseRuns(b)
@@ -342,7 +341,7 @@ func compareNDMRelease(a, b string) int {
 // update from the mesh release pointer. LIVE FINDING (2026-11-21): the
 // controller reports fw-available for every MEMBER (show/mws/member carries
 // fw-available / fw-release-available / fw-update-sandbox, produced by the
-// controller's own update check) but for ITSELF nowhere in the show tree —
+// controller's own update check) but for ITSELF nowhere in the show tree -
 // no show/version field, no show/update, no directory enumeration. Since
 // KeeneticOS releases move as one train across models inside one sandbox,
 // a member's pointer strictly newer than the controller's installed release
@@ -436,7 +435,7 @@ func System(raw json.RawMessage, member json.RawMessage) *probe.SystemData {
 			// "fw-available", even when it equals the installed "fw" (both
 			// "5.1.8" on an up-to-date unit). The NetPulse contract treats a
 			// non-empty firmwareAvailable as "an update is pending", so an
-			// equal value must be omitted — reporting it produced a permanent
+			// equal value must be omitted - reporting it produced a permanent
 			// "update available" badge pointing at the same version.
 			if mem.FWAvailable != "" && mem.FWAvailable != mem.FW {
 				out.FirmwareAvailable = mem.FWAvailable
@@ -606,7 +605,7 @@ func MembersMap(raw json.RawMessage) map[string]MemberInfo {
 // MemberBackhaul is the mesh backhaul block of one member document
 // (show/mws/member "backhaul"): it names the unit the member's uplink
 // attaches to. LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): this is the only
-// authoritative mesh-tree source — the association lists do NOT carry the
+// authoritative mesh-tree source - the association lists do NOT carry the
 // backhaul stations (they list client APs only), and the hotspot DB has no
 // attachment info for directly-attached wireless members.
 //
@@ -615,7 +614,7 @@ func MembersMap(raw json.RawMessage) map[string]MemberInfo {
 //     that owns the "bridge" MAC. LIVE: the controller-attached Buddy reports
 //     bridge "8000.50:ff:20:ae:80:f2" (the controller's bridge) while the
 //     Buddy behind the wired Giga reports "e000.50:ff:20:8e:bf:cb" (the
-//     Giga's base MAC) — the prefix is the STP priority and varies.
+//     Giga's base MAC) - the prefix is the STP priority and varies.
 //   - Wired member (uplink GigabitEthernet..., the block carries
 //     "speed"/"duplex"): "bridge" falls back to the mesh ROOT, which is NOT
 //     necessarily the unit at the other end of the wire (a member wired
@@ -672,7 +671,7 @@ type HotspotClient struct {
 // HotspotWiredClients extracts the wired clients from show/ip/hotspot.
 //
 // LIVE FINDING (2026-11-18, KeeneticOS 5.1.8): the controller's hotspot DB
-// is the ONLY mesh-wide topology source — the units themselves 404 this
+// is the ONLY mesh-wide topology source - the units themselves 404 this
 // section, and no switch/bridge FDB path exists on 5.1 (show/switch,
 // show/switch/port, show/bridge all 404). Each host entry carries its
 // attachment:
@@ -681,7 +680,7 @@ type HotspotClient struct {
 //     show/mws/member cid matches; the port is the physical port ON THAT
 //     MEMBER (the live mesh answers port "4" for a client wired to the
 //     Giga KN-1011 member, with that member's cid);
-//   - "mws": {cid, ap, ...}: wireless on that member — the association
+//   - "mws": {cid, ap, ...}: wireless on that member - the association
 //     list already covers it, skipped here.
 //
 // Only "active" hosts are reported: the hotspot DB keeps dormant entries,
@@ -769,9 +768,9 @@ func isBackhaulStation(ap string) bool {
 // mesh member base MACs) so mesh links never surface as clients.
 //
 // PROVISIONAL attribution rule: the poller queries each unit directly, so the
-// station list is the unit's own associations. A live fixture must confirm
-// what an extender answers (its own clients vs a mesh-wide aggregate) before
-// this function is final — plan §4 Q1.
+// station list is the unit's own associations. LIVE-CONFIRMED on the 5.1.8
+// fixtures: an extender lists its own clients only, and the mesh backhaul
+// station does not appear in the list at all.
 func Wireless(raw json.RawMessage, excludeMACs map[string]bool) *probe.WirelessData {
 	if len(raw) == 0 {
 		return nil
@@ -848,7 +847,7 @@ func RadiosFromAssociations(clients map[string]probe.WirelessClient) []probe.Rad
 // power/station-count, so this source provides band presence and the BSSID;
 // client counts and channels come from the association list (MergeRadios
 // combines the two). The band derives from the WifiMaster index in the
-// interface id; an AP with no recognizable band is skipped — an absent radio
+// interface id; an AP with no recognizable band is skipped - an absent radio
 // is honest, a fabricated one is not.
 func RadiosFromInterfaces(raw json.RawMessage) []probe.Radio {
 	if len(raw) == 0 {
@@ -982,7 +981,7 @@ func normalizeBand(s string) string {
 // database lives on the controller only (an extender answers 404), per-host
 // rx/tx counters are always 0 on 5.x (no clientBw source), and Keenetic
 // auto-registers hosts under junk names like
-// "AA:BB:CC:DD:EE:FF - Home network - 2026-10-11 15:02" — those carry no
+// "AA:BB:CC:DD:EE:FF - Home network - 2026-10-11 15:02" - those carry no
 // information the device list does not already have and are skipped.
 func Names(raw json.RawMessage) []probe.DhcpReservation {
 	if len(raw) == 0 {
@@ -1014,7 +1013,7 @@ func Names(raw json.RawMessage) []probe.DhcpReservation {
 // usefulName accepts a vendor name when it says something a human chose:
 // non-blank, not the MAC itself in any spelling, and not the auto-registered
 // "MAC - Segment - date" template Keenetic mints for every unseen host.
-// LIVE FINDING: auto-registrations come in two shapes — "<MAC> - <segment> -
+// LIVE FINDING: auto-registrations come in two shapes - "<MAC> - <segment> -
 // <date>" (skipped: the MAC adds nothing) and "<hostname> - <segment> -
 // <date>" (the suffix is stripped: the hostname part is the useful bit).
 func usefulName(mac, name string) string {
@@ -1096,7 +1095,7 @@ func Arp(raw json.RawMessage) map[string]string {
 
 // Wan maps show/internet/status. LIVE FINDINGS (controller in bridge/AP mode
 // behind a gateway): the answer carries internet/gateway as an OBJECT and has
-// no top-level address/interface — nothing honest to report, section stays
+// no top-level address/interface - nothing honest to report, section stays
 // nil. On a unit that is its own gateway the top-level interface/address
 // fields appear and the section fills.
 func Wan(raw json.RawMessage) *probe.WanInfo {
@@ -1146,7 +1145,7 @@ func gatewayAddress(raw json.RawMessage) string {
 
 // IfaceCounters extracts the cumulative rx/tx byte counters of one interface
 // from show/interface. LIVE FINDING: KeeneticOS 5.1 carries NO per-interface
-// byte counters, so this usually reports ok=false — which is the honest
+// byte counters, so this usually reports ok=false - which is the honest
 // "no rate source" answer, not a zero rate.
 func IfaceCounters(raw json.RawMessage, id string) (rx, tx uint64, ok bool) {
 	if len(raw) == 0 {
@@ -1196,8 +1195,8 @@ func BridgeMAC(raw json.RawMessage, member json.RawMessage) string {
 	var doc ifacesDoc
 	if len(raw) > 0 && json.Unmarshal(raw, &doc) == nil {
 		// Deterministic pick: a unit can carry more than one bridge (a guest
-		// bridge) and a bare map walk would switch the unit identity — and
-		// with it the backhaul parent match — between pushes. The lowest
+		// bridge) and a bare map walk would switch the unit identity - and
+		// with it the backhaul parent match - between pushes. The lowest
 		// bridge id wins, the same rule PickTrafficIface applies.
 		ids := make([]string, 0, 2)
 		for id, f := range doc {

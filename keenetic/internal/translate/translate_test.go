@@ -10,7 +10,7 @@ import (
 // Fixtures in testdata/ are REDACTED LIVE ANSWERS from the integration's
 // first hardware pass (2026-11-17): KeeneticOS 5.1.8, Ultra (KN-1811)
 // controller in bridge mode behind a gateway, Buddy 6 (KN-3411) and Giga
-// (KN-1011) extenders — one on a wireless backhaul, one on a wired one.
+// (KN-1011) extenders - one on a wireless backhaul, one on a wired one.
 // MACs, IPs, SSIDs and licenses are masked; structure, field spellings and
 // value semantics are exactly as captured.
 
@@ -50,12 +50,12 @@ func TestBoardLive(t *testing.T) {
 	}
 	// LIVE: KeeneticOS 5.1 answers no ndm.version; the human version lives in
 	// title ("5.1.8"). The vendor release id ("5.01.C.8.0-2") is the LAST
-	// fallback — it does not compare as a version.
+	// fallback - it does not compare as a version.
 	if b.Release.Version != "5.1.8" {
 		t.Fatalf("release.version = %q", b.Release.Version)
 	}
 	// LIVE: ndm.exact is a build-only suffix ("0-build1234" here, "0-d43bd79"
-	// on the live unit) — useless alone as the firmware display string, which
+	// on the live unit) - useless alone as the firmware display string, which
 	// NetPulse takes from the description. The version string wins.
 	if b.Release.Description != "5.1.8" {
 		t.Fatalf("release.description = %q", b.Release.Description)
@@ -152,7 +152,7 @@ func TestMemberBackhaul(t *testing.T) {
 	// LIVE shapes (2026-11-18): the controller-attached Buddy reports the
 	// controller's bridge with the mesh-root priority prefix; the Buddy behind
 	// the wired Giga reports the GIGA's base MAC with a different (e000)
-	// prefix — the prefix varies, the MAC is the attachment unit.
+	// prefix - the prefix varies, the MAC is the attachment unit.
 	wifi := MemberBackhaul(members["02:AD:EF:C1:80:8A"].Raw)
 	if !wifi.Wireless {
 		t.Fatalf("wireless member = %+v", wifi)
@@ -219,7 +219,7 @@ func TestSystemMemberFromMeshList(t *testing.T) {
 		t.Fatal("System = nil for cable member")
 	}
 	// LIVE FINDING: the wired member's backhaul object has speed/duplex and
-	// no rssi — the medium must still be cable.
+	// no rssi - the medium must still be cable.
 	if s.Backhaul != "cable" {
 		t.Fatalf("backhaul = %q, want cable", s.Backhaul)
 	}
@@ -234,7 +234,7 @@ func TestSystemMemberFromMeshList(t *testing.T) {
 func TestSystemFirmwareAvailableOnlyOnDifference(t *testing.T) {
 	// LIVE (2026-11-18): the mesh report carries fw-available = fw = "5.1.8"
 	// on an up-to-date unit. NetPulse treats any non-empty firmwareAvailable
-	// as "update pending", so an equal value must be omitted — otherwise the
+	// as "update pending", so an equal value must be omitted - otherwise the
 	// UI shows a permanent "available: 5.1.8" badge on the current version.
 	member := MembersMap(fixture(t, "mws_member_mesh.json"))["02:AD:EF:8E:BF:CB"].Raw
 	s := System(nil, member)
@@ -411,7 +411,7 @@ func TestWirelessExtenderLive(t *testing.T) {
 func TestWirelessUnknownAPKeepsEmptyBand(t *testing.T) {
 	// A station whose AP name does not parse as a WifiMaster band has no
 	// honest band: it must NOT be filed under 2.4 GHz (a guessed band would
-	// put a 5 GHz client in the wrong matrix row). The client itself stays —
+	// put a 5 GHz client in the wrong matrix row). The client itself stays -
 	// signal, interface and counters are real.
 	const doc = `{"station":[{"mac":"0e:00:00:00:aa:01","ap":"WifiMaster9/AccessPoint0","authenticated":true,"rssi":-48,"rxbytes":10,"txbytes":20}]}`
 	w := Wireless(json.RawMessage(doc), nil)
@@ -434,7 +434,7 @@ func TestWirelessUnknownAPKeepsEmptyBand(t *testing.T) {
 
 func TestBridgeMACPicksTheLowestBridgeID(t *testing.T) {
 	// Two bridges (a guest bridge): a bare map walk would switch the unit
-	// identity — and with it the backhaul parent match — between pushes.
+	// identity - and with it the backhaul parent match - between pushes.
 	// The lowest bridge id must win on every map iteration order.
 	const doc = `{"Bridge1":{"type":"Bridge","mac":"02:AD:EF:99:99:99"},"Bridge0":{"type":"Bridge","mac":"02:ad:ef:ae:80:f2"},"WifiMaster0":{"type":"WifiMaster"}}`
 	ifaces := json.RawMessage(doc)
@@ -452,8 +452,8 @@ func TestBridgeMACPicksTheLowestBridgeID(t *testing.T) {
 
 func TestSystemExtenderLive(t *testing.T) {
 	// The extender's own show/system: the poller's direct-member path feeds
-	// exactly this fixture. Memory appears in both shapes KeeneticOS emits —
-	// the "free/total" KiB string and the memtotal/memfree integers — and
+	// exactly this fixture. Memory appears in both shapes KeeneticOS emits -
+	// the "free/total" KiB string and the memtotal/memfree integers - and
 	// bytes must come out honest either way.
 	sys := System(fixture(t, "system_extender.json"), nil)
 	if sys == nil {
@@ -482,7 +482,7 @@ func TestRadiosFromInterfacesLive(t *testing.T) {
 	byBand := map[string]string{}
 	for _, r := range radios {
 		byBand[r.Name] = r.BSSID
-		// LIVE: no channel/width/power on KeeneticOS 5.1 interface entries —
+		// LIVE: no channel/width/power on KeeneticOS 5.1 interface entries -
 		// the radio must carry zeros rather than invented values.
 		if r.Channel != 0 || r.WidthMhz != 0 || r.PowerDbm != 0 {
 			t.Fatalf("radio %s fabricates detail: %+v", r.Name, r)
@@ -572,7 +572,7 @@ func TestArpLive(t *testing.T) {
 
 func TestWanAPModeIsAbsent(t *testing.T) {
 	// LIVE: the controller sits behind a gateway; internet/status carries the
-	// check result but no public address — no WAN section may be fabricated.
+	// check result but no public address - no WAN section may be fabricated.
 	if wan := Wan(fixture(t, "internet_status_ap_mode.json")); wan != nil {
 		t.Fatalf("wan = %+v, want nil", wan)
 	}

@@ -165,7 +165,7 @@ func (e *memberError) Error() string {
 
 // fetchMembers reads show/mws/member from the given client. A 404 (no mesh
 // component, or an extender) yields an empty map; other failures are logged
-// and also yield an empty map — EXCEPT a credential rejection, which
+// and also yield an empty map - EXCEPT a credential rejection, which
 // propagates: the fleet must stop instead of hammering the router.
 func (p *Poller) fetchMembers(ctx context.Context, api *keeneticapi.Client) (map[string]translate.MemberInfo, error) {
 	raw, _, err := api.TryGet(ctx, "show/mws/member")
@@ -209,7 +209,7 @@ func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
 // pollUnit builds the payload of one unit. api is the client the section
 // queries go to (the member directly when one is selected, the configured
 // host otherwise); members is the mesh report ALREADY fetched from the
-// controller — the fleet shape fetches it once per cycle for all units.
+// controller - the fleet shape fetches it once per cycle for all units.
 // meshHotspot is the controller's show/ip/hotspot answer, fetched once per
 // fleet cycle; it is the source of the member's wired-client FDB.
 func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo, meshHotspot json.RawMessage) (*probe.PayloadData, error) {
@@ -222,15 +222,15 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 		}
 		member = info.Raw
 		memberIP = info.IP
-		// PROVISIONAL (integration issue #1, plan §4 Q1/Q6): a member is
-		// queried directly at its management address so the association list
-		// is the member's own. Live-confirmed on KeeneticOS 5.1.8: an
-		// extender answers version/system/associations/arp/interface and
-		// 404s hotspot and mws/member (controller-only sections).
+		// PROVISIONAL: a member is queried directly at its management address
+		// so the association list is the member's own. LIVE (KeeneticOS
+		// 5.1.8): an extender answers version/system/associations/arp/
+		// interface and 404s hotspot and mws/member (controller-only
+		// sections).
 	}
 
 	// Identity sections: a poll without these carries no honest data. A
-	// member whose own RCI does not answer (network failure — a credential
+	// member whose own RCI does not answer (network failure - a credential
 	// rejection stays terminal) degrades to the facts the controller
 	// already knows: the member report (health, firmware, backhaul) plus
 	// the controller's hotspot DB for the wired-client FDB. The member's
@@ -279,7 +279,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 	}
 
 	// Optional sections: a 404 (not on this firmware) or a transient failure
-	// keeps the section absent — NetPulse holds the last good value — while a
+	// keeps the section absent - NetPulse holds the last good value - while a
 	// credential rejection stops the unit instead of reporting a half-alive
 	// poll with revoked credentials.
 	var assoc, hotspot, lease, arp, ifaces, internet json.RawMessage
@@ -404,7 +404,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 	var wirelessSide map[string]string
 	// Mesh children on a wireless backhaul: the member report names the unit
 	// each child attaches to (backhaul.bridge); THIS unit's FDB must learn the
-	// child's base MAC so the server's uplink evidence hangs the child here —
+	// child's base MAC so the server's uplink evidence hangs the child here -
 	// otherwise the gateway's transit FDB claims it and the map draws the
 	// repeater as wired to the gateway. The entry is the backhaul radio band,
 	// the same hint the WirelessSide section carries (the backhaul station
@@ -430,7 +430,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 // to the unit with the given bridge MAC. unitMAC is the reported unit's own
 // base MAC ("" for the controller): a unit is never its own backhaul child.
 // Only WIRELESS members count: a wired member's backhaul "bridge" falls back
-// to the mesh root, which is not the unit at the other end of the wire — its
+// to the mesh root, which is not the unit at the other end of the wire - its
 // parent comes from FDB evidence.
 func meshBackhaulFDB(bridgeMAC, unitMAC string, members map[string]translate.MemberInfo) (map[string]string, map[string]string) {
 	bridge := strings.ToUpper(strings.TrimSpace(bridgeMAC))
@@ -467,7 +467,7 @@ func meshBackhaulFDB(bridgeMAC, unitMAC string, members map[string]translate.Mem
 // The controller claims the hosts attached to itself; a member claims the
 // hosts whose mws.cid matches its own cid. nil = the source section is
 // unavailable this cycle (keep the last good FDB); an EMPTY map is a valid
-// fresh answer (no wired clients right now — clears stale entries).
+// fresh answer (no wired clients right now - clears stale entries).
 func (p *Poller) fdbFor(unitMAC string, ownHotspot, meshHotspot json.RawMessage, members map[string]translate.MemberInfo) map[string]string {
 	var raw json.RawMessage
 	var wantCID string
@@ -512,8 +512,8 @@ func (p *Poller) fdbFor(unitMAC string, ownHotspot, meshHotspot json.RawMessage,
 }
 
 // meshHotspotDB fetches the mesh-wide hotspot DB. A 404 (unit without the
-// section) and a transient failure yield a nil section — the FDB keeps its
-// last good value — while a credential rejection is returned as a terminal
+// section) and a transient failure yield a nil section - the FDB keeps its
+// last good value - while a credential rejection is returned as a terminal
 // error for the cycle.
 func (p *Poller) meshHotspotDB(ctx context.Context, api *keeneticapi.Client) (json.RawMessage, error) {
 	raw, err := api.Get(ctx, "show/ip/hotspot")

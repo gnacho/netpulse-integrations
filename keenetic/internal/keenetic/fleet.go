@@ -1,4 +1,4 @@
-// fleet.go — many units in ONE process. One cycle reads the mesh report from
+// fleet.go - many units in ONE process. One cycle reads the mesh report from
 // the controller once and then polls every configured unit, producing one
 // payload per unit; the caller pushes each under its own slug and token.
 package keenetic

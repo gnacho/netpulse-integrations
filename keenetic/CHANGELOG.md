@@ -16,12 +16,12 @@
   the unit.
 - The controller unit now reports its own pending firmware update. LIVE
   (2026-11-21): the controller gives itself no `fw-available` anywhere in the
-  show tree — but every `show/mws/member` entry echoes the controller's own
+  show tree - but every `show/mws/member` entry echoes the controller's own
   update-check result (`fw-release-available`/`fw-available`/
   `fw-update-sandbox`). KeeneticOS releases move as one train per sandbox, so
   a pointer strictly newer than the controller's installed `release` (numeric
-  run compare — ".10." > ".8.") means the controller is updatable too; BOTH
-  sandboxes must be known and equal — an unknown sandbox infers nothing — and
+  run compare - ".10." > ".8.") means the controller is updatable too; BOTH
+  sandboxes must be known and equal - an unknown sandbox infers nothing - and
   an equal pointer raises no badge. Known accepted limit (the badge is
   informational, nothing acts on it): a controller model that left the train
   (EOL) while a newer member model still moves would be badged too.
@@ -40,7 +40,7 @@
   per unit; a mesh member adds `mac`), completing the supervisor deployment
   shape documented in the README.
 
-## 0.1.5 — 2026-11-18
+## 0.1.5 - 2026-11-18
 
 Mesh tree: wireless-backhaul repeaters are attributed to the unit they
 associate with, not to the gateway.
@@ -57,12 +57,12 @@ associate with, not to the gateway.
   uplink link is drawn from its real parent (amber dashed "WiFi uplink")
   instead of the gateway's transit FDB.
 - A wired member's `backhaul.bridge` falls back to the mesh root and is NOT
-  used — its parent keeps coming from FDB evidence.
+  used - its parent keeps coming from FDB evidence.
 - Mesh re-parenting (a repeater roaming to another unit's backhaul) is
   tracked automatically: the next cycle moves the FDB entry to the new
   parent.
 
-## 0.1.4 — 2026-11-18
+## 0.1.4 - 2026-11-18
 
 Topology: wired clients are attributed to the Keenetic unit they are
 physically plugged into.
@@ -70,10 +70,10 @@ physically plugged into.
 - The controller's hotspot DB (`show/ip/hotspot`) is the only mesh-wide
   topology source on KeeneticOS 5.1: the units themselves 404 the section,
   and no switch/bridge FDB path exists (`show/switch`, `show/switch/port`,
-  `show/bridge` all 404 — probed live on a Giga KN-1011).
+  `show/bridge` all 404 - probed live on a Giga KN-1011).
 - Each hotspot host carries its attachment: a top-level `port` when wired to
   the reporting unit, or an `mws` block (`cid`, `port`, `speed`) when wired
-  to a mesh member — the port is the PHYSICAL port on that member. The
+  to a mesh member - the port is the PHYSICAL port on that member. The
   fleet poller now turns these into the NetPulse FDB section per unit.
 - Without an FDB section the server attributed these clients to the
   gateway's transit FDB (it sees every mesh client MAC on the port toward
@@ -81,7 +81,7 @@ physically plugged into.
   gateway. Per-unit FDB claims them first, so the map draws the right unit
   and the right physical port.
 
-## 0.1.3 — 2026-11-18
+## 0.1.3 - 2026-11-18
 
 Firmware honesty fix: no phantom update, no build hash as the version.
 
@@ -98,7 +98,7 @@ Firmware honesty fix: no phantom update, no build hash as the version.
   vendor release id ("5.01.C.8.0-2") as last fallback; the exact build id
   is kept as the description only when it embeds the version.
 
-## 0.1.2 — 2026-11-18
+## 0.1.2 - 2026-11-18
 
 Session reuse: one authentication per router instead of one per cycle.
 
@@ -108,11 +108,11 @@ Session reuse: one authentication per router instead of one per cycle.
   authenticates ONCE per router, not once per cycle per unit (the fleet
   used to perform 4 challenge handshakes every 60 s).
 - When the session does expire (idle gap > window, router reboot), the
-  next 401 re-authenticates transparently and the cycle completes —
+  next 401 re-authenticates transparently and the cycle completes -
   unchanged behaviour, it just no longer happens by construction.
 - Removed the write-only session bookkeeping fields from the client.
 
-## 0.1.1 — 2026-11-18
+## 0.1.1 - 2026-11-18
 
 Fleet mode: one process for the whole mesh.
 
@@ -126,7 +126,7 @@ Fleet mode: one process for the whole mesh.
   hammering); per-unit failures stay independent.
 - Single-unit env mode unchanged (the shared supervisor contract).
 
-## 0.1.0 — 2026-11-18
+## 0.1.0 - 2026-11-18
 
 First read-only slice.
 

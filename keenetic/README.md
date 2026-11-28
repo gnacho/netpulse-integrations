@@ -20,7 +20,7 @@ Every KeeneticOS unit becomes its own NetPulse router with its own slug and
 agent token, exactly like any other external unit. A mesh of one controller
 and three extenders is four entries. There is no "mesh" object in the fleet:
 each unit carries its own health (CPU, memory, uptime, firmware), its own
-Wi-Fi clients with band and signal, and — for extenders — its backhaul
+Wi-Fi clients with band and signal, and - for extenders - its backhaul
 medium and pending firmware.
 
 The controller is the only unit that knows the mesh (member list, backhaul
@@ -35,7 +35,7 @@ each unit's `show/associations` lists only its own clients.
 **Fleet mode** is the recommended deployment for a mesh: one process reads
 the mesh report from the controller once per cycle and then polls every
 configured unit, pushing one signed payload per unit. Configuration lives in
-a JSON file (chmod 600 — it carries the tokens and the account password):
+a JSON file (chmod 600 - it carries the tokens and the account password):
 
 ```json
 {
@@ -55,7 +55,7 @@ a JSON file (chmod 600 — it carries the tokens and the account password):
 Run it with `KEENETIC_CONFIG=/path/to/config.json`. Optional keys:
 `ca_file` / `server_fp` (HTTPS to NetPulse, never both), `timeout`
 (per-request, default 10s), `insecure_tls` (unit self-signed certificate) or
-`cert_fp` (SHA-256 SPKI pin of the unit certificate — the stronger trust;
+`cert_fp` (SHA-256 SPKI pin of the unit certificate - the stronger trust;
 mutually exclusive with `insecure_tls`, applies to every unit in the fleet).
 
 Sessions are reused: the poller keeps one authenticated client per router
@@ -70,7 +70,7 @@ cycle like a network error and is retried.
 
 **Single-unit mode** (one slug per process) keeps the shared
 `NETPULSE_*`/`KEENETIC_*` environment contract and is what the integrations
-supervisor consumes — see the table below.
+supervisor consumes - see the table below.
 
 ## Configuration (single-unit mode)
 
@@ -83,7 +83,7 @@ Standalone binary environment:
 | `NETPULSE_SLUG` | Slug registered for THIS unit. Required. |
 | `NETPULSE_INTERVAL` | Push cadence (Go duration, default 30s). |
 | `NETPULSE_SERVER_FP` / `NETPULSE_CA_FILE` | HTTPS server authentication; never both. |
-| `KEENETIC_HOST` | Unit or controller address (`192.168.1.1` or `http://…`). Required. |
+| `KEENETIC_HOST` | Unit or controller address (`192.168.1.1` or `http://<host>`). Required. |
 | `KEENETIC_USER` | Dedicated read-only account. Required. |
 | `KEENETIC_PASS` | That account's password. Required. |
 | `KEENETIC_UNIT_MAC` | Base MAC of the mesh member this entry reports (any case). Empty = the unit `KEENETIC_HOST` points at. |
@@ -124,7 +124,7 @@ device, so an entry pins the certificate the units it contacts present).
   MAC. The extender is polled directly at the address the controller
   reports; when that address is unreachable the entry degrades to the facts
   the controller knows (health, firmware, backhaul) and keeps its clients
-  empty until the member answers again — the wired-client FDB from the
+  empty until the member answers again - the wired-client FDB from the
   controller's hotspot DB still updates, so the map keeps the unit and its
   ports in place during the outage. A credential rejection (401 even after
   a fresh handshake) is terminal for the unit.
@@ -146,11 +146,11 @@ never commit it.
 | `show/system` | `system.cpu`, `system.sysinfo` | CPU load %, uptime, memory. Keenetic reports KiB; converted to bytes. |
 | `show/mws/member` | `system.firmwareAvailable`, `system.backhaul`, per-member `system` | Controller-only source; the member entry is matched by base MAC. Backhaul medium: `rssi` in the backhaul object = wifi, `speed`/`duplex` = cable. |
 | `show/mws/member` (again) | `system.firmwareAvailable` for the CONTROLLER unit | The controller reports its own availability nowhere in the show tree; the member entries echo its update-check result (`fw-release-available`/`fw-available`/`fw-update-sandbox`). KeeneticOS releases move as one train per sandbox, so a pointer newer than the controller's installed `release` means the controller itself is updatable. BOTH sandboxes must be known and equal (an unknown sandbox is no evidence of the same train), numeric release ordering applies (`.10.` > `.8.`), and an equal pointer stays badge-free. Known accepted limit (informational badge, nothing acts on it): a controller model that left the train (EOL) while a newer member model still moves would be badged too. |
-| `show/mws/member` | `fdb` (+`wirelessSide`) | Mesh tree: for a WIRELESS member, `backhaul.bridge` (STP prefix + MAC) names the unit it associates with — that unit's FDB learns the child's base MAC (label = backhaul band), so the server hangs the repeater's uplink off its real parent instead of the gateway transit. A wired member's `bridge` falls back to the mesh root and is ignored. |
+| `show/mws/member` | `fdb` (+`wirelessSide`) | Mesh tree: for a WIRELESS member, `backhaul.bridge` (STP prefix + MAC) names the unit it associates with - that unit's FDB learns the child's base MAC (label = backhaul band), so the server hangs the repeater's uplink off its real parent instead of the gateway transit. A wired member's `bridge` falls back to the mesh root and is ignored. |
 | `show/associations` | `wireless.clients`, `wireless.radios` | The unit's OWN clients (each unit answers for itself). Band from the `WifiMasterN` index of the AP interface. Station rx/tx counters are cumulative since association; the server computes the rates. |
-| `show/interface` | radio summary (BSSID per band) | KeeneticOS 5.1 exposes no channel, width, tx power or per-interface byte counters — those fields stay absent rather than invented. |
+| `show/interface` | radio summary (BSSID per band) | KeeneticOS 5.1 exposes no channel, width, tx power or per-interface byte counters - those fields stay absent rather than invented. |
 | `show/ip/hotspot` (controller only) | `dhcp.reservations` | Known-host names pinned to MACs without addresses (same rule as the UniFi integration). Keenetic's auto-registration templates (`<MAC> - <segment> - <date>`) are skipped as noise. |
-| `show/ip/hotspot` (controller only) | `fdb` | Wired clients per unit as MAC → physical port. The host's top-level `port` is the port on the reporting unit; the `mws` block (`cid` + `port`) is the port ON that mesh member. This is the only mesh-wide topology source on 5.1 — the units themselves 404 the section. |
+| `show/ip/hotspot` (controller only) | `fdb` | Wired clients per unit as MAC → physical port. The host's top-level `port` is the port on the reporting unit; the `mws` block (`cid` + `port`) is the port ON that mesh member. This is the only mesh-wide topology source on 5.1 - the units themselves 404 the section. |
 | `show/ip/arp` | `arp` | MAC → IPv4 of the unit's LAN view. |
 | `show/ip/dhcp/binding(s)` | `dhcp.leases` | Only when the unit really answers (it is the DHCP server). An extender 404s and the section stays absent. |
 | `show/internet/status` | `wan` | Only when the answer carries a public address: a unit behind a gateway (bridge/AP mode) reports none and the section stays nil. |

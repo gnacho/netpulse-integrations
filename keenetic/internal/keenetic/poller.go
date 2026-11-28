@@ -1,0 +1,757 @@
+// Package keenetic is the NetPulse poller for KeeneticOS units. It drives the
+// read-only RCI client, picks the sections each unit exposes, and hands the
+// raw answers to the translate package.
+//
+// Two shapes of the same poller:
+//
+//   - Poller: one unit per process (slug + token from the environment), for
+//     the shared integrations supervisor and single-unit deployments.
+//   - Fleet: many units in one process (units from a JSON config file). One
+//     cycle reads the mesh report from the controller ONCE and then polls
+//     each unit, pushing one signed payload per unit.
+//
+// In both shapes the association logic is identical: the member of the mesh
+// is queried directly at the management address the controller reports, so
+// its association list is its own clients.
+package keenetic
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/netip"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gnacho/netpulse-integrations/internal/tlspin"
+	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
+	"github.com/gnacho/netpulse-integrations/keenetic/internal/translate"
+	"github.com/gnacho/netpulse/agent/probe"
+)
+
+// Config is the poller configuration: where the units live, the credentials,
+// and (single-unit shape) which member of the mesh this poller reports.
+type Config struct {
+	// Host of the unit to query, or of the mesh controller when a unit MAC
+	// selects a member. A bare host talks plain HTTP.
+	Host string
+	User string
+	// Password of a dedicated read-only account. Never the browsing admin
+	// account. Lives in the supervisor entry or the config file, never in a
+	// repository.
+	Password string
+	// UnitMAC (base MAC, any case) selects the mesh member this poller
+	// reports. Empty means "the unit the host points at". The member is
+	// queried directly at the management address the controller reports;
+	// if that address is unreachable the poller degrades to the controller
+	// data for that member (system, firmware, backhaul).
+	UnitMAC string
+	// Timeout per HTTP request (zero = the client default).
+	Timeout time.Duration
+	// InsecureTLS accepts the unit self-signed certificate.
+	InsecureTLS bool
+	// CertFP pins the unit certificate by SPKI (https:// targets).
+	CertFP string
+}
+
+// rateSample is the previous traffic sample of ONE unit (cumulative interface
+// counters), used for system rates.
+type rateSample struct {
+	rx, tx uint64
+	at     time.Time
+	ok     bool
+}
+
+// Poller polls units of one Keenetic installation. Safe for sequential use;
+// the mutex guards the rate samples map, the client session cache and the
+// member auth-retry moments.
+type Poller struct {
+	cfg Config
+
+	mu       sync.Mutex
+	samples  map[string]*rateSample
+	clients  map[string]*keeneticapi.Client
+	rejected map[string]time.Time // member base MAC -> next retry after a credential rejection
+	now      func() time.Time     // the clock; replaced with a fake in tests
+}
+
+// New validates the config.
+func New(cfg Config) (*Poller, error) {
+	cfg.UnitMAC = strings.TrimSpace(cfg.UnitMAC)
+	if cfg.UnitMAC != "" {
+		normalized := translate.NormalizeMAC(cfg.UnitMAC)
+		if normalized == "" {
+			return nil, fmt.Errorf("invalid unit MAC %q", cfg.UnitMAC)
+		}
+		// The member map is keyed by normalized MACs; store the selector in
+		// the same form.
+		cfg.UnitMAC = normalized
+	}
+	if strings.TrimSpace(cfg.CertFP) != "" {
+		// Fail a bad pin at configuration time, not on the first handshake.
+		if _, err := tlspin.Parse(cfg.CertFP); err != nil {
+			return nil, fmt.Errorf("cert_fp: %w", err)
+		}
+	}
+	return &Poller{
+		cfg:      cfg,
+		samples:  map[string]*rateSample{},
+		clients:  map[string]*keeneticapi.Client{},
+		rejected: map[string]time.Time{},
+		now:      time.Now,
+	}, nil
+}
+
+// controllerSchemePort extracts the scheme and the explicitly configured port
+// of the configured host. A bare host talks plain HTTP (the client's own
+// default); a scheme-default port comes back empty, so nothing is appended.
+// The controller client validated this host already; the defaults below are
+// defensive.
+func (p *Poller) controllerSchemePort() (scheme, port string) {
+	host := strings.TrimSpace(p.cfg.Host)
+	if !strings.Contains(host, "://") {
+		host = "http://" + host
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return "http", ""
+	}
+	return u.Scheme, u.Port()
+}
+
+// memberAddr builds the base URL of a member's own RCI: the controller's
+// scheme and explicitly configured port applied to the management address the
+// member report carries. REVIEW FIX (round 2): the bare report IP used to
+// default to http:// inside the client, so an HTTPS controller with a pinned
+// certificate degraded a TLS-only member - or queried an http-accepting
+// member WITHOUT the pin, although the pin covers every fleet unit.
+// REVIEW FIX (round 3): the address is parsed, not guessed - a colon test
+// used to read an IPv6 literal as host:port and either dropped the inherited
+// port or dialled a mis-split host.
+func (p *Poller) memberAddr(memberIP string) (string, error) {
+	scheme, port := p.controllerSchemePort()
+	auth, err := memberAuthority(memberIP, port)
+	if err != nil {
+		return "", err
+	}
+	raw := scheme + "://" + auth
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid member address %q", memberIP)
+	}
+	return raw, nil
+}
+
+// memberAuthority turns one member management address into a URL authority:
+//
+//   - "host:port" / "[v6]:port": a full authority, kept as reported;
+//   - a bare IP literal: IPv6 bracketed (the zone, if any, percent-encoded),
+//     IPv4 bare;
+//   - a bare host name: bare;
+//
+// and the inherited port is appended when the address carries none. Anything
+// else - an empty address, stray brackets, multi-colon garbage, a bad port -
+// is an error: the caller then treats the member as unreachable instead of
+// dialling a broken address.
+func memberAuthority(memberIP, port string) (string, error) {
+	addr := strings.TrimSpace(memberIP)
+	if addr == "" {
+		return "", errors.New("empty member address")
+	}
+	if h, prt, err := net.SplitHostPort(addr); err == nil && h != "" && decimalPort(prt) {
+		// "host:port" / "[v6]:port": the report carries a full authority (the
+		// brackets may come back stripped from SplitHostPort). An unbracketed
+		// multi-colon host (the "fd00:" mis-split of "fd00::35") is not one:
+		// it falls through and is re-read as an IPv6 literal.
+		if strings.HasPrefix(addr, "[") || !strings.Contains(h, ":") {
+			return addr, nil
+		}
+	}
+	if strings.HasPrefix(addr, "[") {
+		return "", fmt.Errorf("invalid member address %q", addr)
+	}
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		if ip.Is6() {
+			host, _ := ip.MarshalText()
+			// The zone (if any) must be percent-encoded for a URL; MarshalText
+			// leaves the raw "%" in place.
+			addr = "[" + strings.ReplaceAll(string(host), "%", "%25") + "]"
+		} else {
+			addr = ip.String()
+		}
+	} else if strings.ContainsAny(addr, ":%[]") {
+		return "", fmt.Errorf("invalid member address %q", addr)
+	}
+	if port != "" {
+		addr += ":" + port
+	}
+	return addr, nil
+}
+
+// decimalPort reports a numeric (or empty) port: net.SplitHostPort itself
+// does not validate the digits, so "fe80::1" would split into the host
+// "fe80:" and the port "1" without complaint.
+func decimalPort(prt string) bool {
+	for _, r := range prt {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// client returns the RCI client of one address, creating it on first use and
+// caching it for the poller's lifetime. The cache IS the session reuse: the
+// KeeneticOS cookie session lives in a 300-second sliding window that every
+// request extends, so a steady cycle authenticates once per router and then
+// walks with the issued session; when the router closes it anyway (idle gap
+// longer than the window, reboot), the next 401 triggers one transparent
+// re-authentication inside the client. Keyed by address string, so a member
+// whose management address changes simply gets a fresh entry; the stale one
+// stays harmlessly idle.
+func (p *Poller) client(host string) (*keeneticapi.Client, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.clients[host]; ok {
+		return c, nil
+	}
+	c, err := keeneticapi.New(keeneticapi.Config{
+		Host:        host,
+		User:        p.cfg.User,
+		Password:    p.cfg.Password,
+		Timeout:     p.cfg.Timeout,
+		InsecureTLS: p.cfg.InsecureTLS,
+		CertFP:      p.cfg.CertFP,
+	})
+	if err != nil {
+		return nil, err
+	}
+	p.clients[host] = c
+	return c, nil
+}
+
+// memberError reports that the selected mesh member is not in the controller
+// list right now (rebooting, or it left the mesh). Non-terminal: the next
+// cycle retries, NetPulse retains the last good data meanwhile.
+type memberError struct{ mac string }
+
+func (e *memberError) Error() string {
+	return "mesh member " + e.mac + " is not in the controller member list"
+}
+
+// MemberAuthError reports that ONE mesh member's own RCI rejected the fleet
+// credentials. A KeeneticOS member keeps its own user list (re-pairing the
+// mesh does not sync it), so the shared account can be right on the
+// controller and stale on one member. REVIEW FIX (round 3): this used to be
+// a plain %w wrap of the AuthError, which stopped the whole fleet over one
+// member and hid the Terminal() marker from the shared single-unit loops.
+type MemberAuthError struct {
+	MAC      string    // base MAC of the member
+	Addr     string    // management address the member is reached at
+	Err      error     // the underlying *keeneticapi.AuthError; nil inside the cooldown
+	Cooldown bool      // true = this cycle was skipped without contacting the member
+	RetryAt  time.Time // when the member may be asked again
+}
+
+func (e *MemberAuthError) Error() string {
+	detail := "rejected the fleet credentials"
+	if e.Cooldown {
+		detail = fmt.Sprintf("rejected the fleet credentials earlier; not retried before %s",
+			e.RetryAt.Format(time.RFC3339))
+	} else if e.Err != nil {
+		detail += ": " + e.Err.Error()
+	}
+	return fmt.Sprintf("mesh member %s (%s) %s", e.MAC, e.Addr, detail)
+}
+
+// Unwrap exposes the underlying AuthError to errors.As.
+func (e *MemberAuthError) Unwrap() error { return e.Err }
+
+// Terminal marks MemberAuthError for the shared pusher loop's
+// stop-on-terminal rule: in the single-unit shape the rejected member IS the
+// unit, so the supervisor disables it like any credential rejection.
+func (e *MemberAuthError) Terminal() bool { return true }
+
+// fetchMembers reads show/mws/member from the given client. A 404 (no mesh
+// component, or an extender) yields an empty map; other failures are logged
+// and also yield an empty map - EXCEPT a credential rejection, which
+// propagates: the fleet must stop instead of hammering the router.
+func (p *Poller) fetchMembers(ctx context.Context, api *keeneticapi.Client) (map[string]translate.MemberInfo, error) {
+	raw, _, err := api.TryGet(ctx, "show/mws/member")
+	if err == nil {
+		return translate.MembersMap(raw), nil
+	}
+	if isNotFound(err) {
+		return map[string]translate.MemberInfo{}, nil
+	}
+	var auth *keeneticapi.AuthError
+	if errors.As(err, &auth) {
+		return nil, err
+	}
+	slog.Debug("keenetic: mesh member list unavailable", "err", err)
+	return map[string]translate.MemberInfo{}, nil
+}
+
+// Poll collects one coherent snapshot of ONE unit (single-unit shape).
+func (p *Poller) Poll(ctx context.Context) (*probe.PayloadData, error) {
+	api, err := p.client(p.cfg.Host)
+	if err != nil {
+		return nil, err
+	}
+	members, err := p.fetchMembers(ctx, api)
+	if err != nil {
+		return nil, err
+	}
+	// A member's wired-client topology comes from the controller's hotspot
+	// DB (the only mesh-wide source; the member itself 404s the section).
+	var meshHotspot json.RawMessage
+	if p.cfg.UnitMAC != "" {
+		raw, err := p.meshHotspotDB(ctx, api)
+		if err != nil {
+			return nil, err
+		}
+		meshHotspot = raw
+	}
+	return p.pollUnit(ctx, api, p.cfg.UnitMAC, members, meshHotspot)
+}
+
+// pollUnit builds the payload of one unit. api is the client the section
+// queries go to (the member directly when one is selected, the configured
+// host otherwise); members is the mesh report ALREADY fetched from the
+// controller - the fleet shape fetches it once per cycle for all units.
+// meshHotspot is the controller's show/ip/hotspot answer, fetched once per
+// fleet cycle; it is the source of the member's wired-client FDB.
+func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC string, members map[string]translate.MemberInfo, meshHotspot json.RawMessage) (*probe.PayloadData, error) {
+	var member json.RawMessage
+	var memberIP string
+	if unitMAC != "" {
+		info, ok := members[unitMAC]
+		if !ok {
+			return nil, &memberError{mac: unitMAC}
+		}
+		member = info.Raw
+		memberIP = info.IP
+		// PROVISIONAL: a member is queried directly at its management address
+		// so the association list is the member's own. LIVE (KeeneticOS
+		// 5.1.8): an extender answers version/system/associations/arp/
+		// interface and 404s hotspot and mws/member (controller-only
+		// sections).
+	}
+
+	// Identity sections: a poll without these carries no honest data. A
+	// member whose own RCI does not answer (network failure - a credential
+	// rejection stays terminal) degrades to the facts the controller
+	// already knows: the member report (health, firmware, backhaul) plus
+	// the controller's hotspot DB for the wired-client FDB. The member's
+	// own sections stay absent this cycle and NetPulse keeps their last
+	// good values. The controller identity is NEVER substituted for a
+	// member's: those facts belong to the wrong unit.
+	var degraded bool
+	var version, systemRaw json.RawMessage
+	var memberAPI *keeneticapi.Client // the member's own RCI (nil = unreachable)
+	var memberAddr string             // the member's base URL ("" when unusable)
+	if unitMAC == "" {
+		// The unit the host points at: the controller client IS the unit.
+		var err error
+		if version, err = api.Get(ctx, "show/version"); err != nil {
+			return nil, fmt.Errorf("show/version: %w", err)
+		}
+		if systemRaw, err = api.Get(ctx, "show/system"); err != nil {
+			return nil, fmt.Errorf("show/system: %w", err)
+		}
+	} else {
+		if memberIP != "" {
+			addr, addrErr := p.memberAddr(memberIP)
+			if addrErr != nil {
+				// REVIEW FIX (round 3): an address the poller cannot parse is
+				// an unreachable member with the reason in the log - not a
+				// request to a mis-split host.
+				slog.Info("keenetic: unusable member address, degrading to the controller's facts",
+					"unit", unitMAC, "member_addr", memberIP, "err", addrErr)
+			} else {
+				memberAddr = addr
+			}
+		}
+		if memberAddr != "" {
+			// A member that rejected the fleet credentials recently is left
+			// alone until the retry moment: the same secret cannot succeed
+			// (the member keeps its own user list), and one failed login per
+			// cycle is exactly the hammering the terminal rule exists to
+			// avoid (review round 3).
+			if until, skip := p.memberRejectedUntil(unitMAC); skip {
+				return nil, &MemberAuthError{MAC: unitMAC, Addr: memberAddr, Cooldown: true, RetryAt: until}
+			}
+			memberAPI, _ = p.client(memberAddr) // dial failure = unreachable member
+		}
+		if memberAPI == nil {
+			degraded = true
+		} else {
+			var err error
+			if version, err = memberAPI.Get(ctx, "show/version"); err != nil {
+				if isAuth(err) {
+					// A credential rejection from the member's own RCI is
+					// scoped to THIS unit: the fleet's other units keep
+					// reporting (review round 3).
+					return nil, p.memberAuthRejected(unitMAC, memberAddr, err)
+				}
+				degraded = true
+			}
+			if !degraded {
+				if systemRaw, err = memberAPI.Get(ctx, "show/system"); err != nil {
+					if isAuth(err) {
+						return nil, p.memberAuthRejected(unitMAC, memberAddr, err)
+					}
+					degraded = true
+				}
+			}
+		}
+		if degraded {
+			addr := memberAddr
+			if addr == "" {
+				addr = memberIP
+			}
+			slog.Info("keenetic: member unreachable, degrading to the controller's facts",
+				"unit", unitMAC, "member_addr", addr)
+		}
+	}
+
+	// Optional sections: a 404 (not on this firmware) or a transient failure
+	// keeps the section absent - NetPulse holds the last good value - while a
+	// credential rejection stops the unit instead of reporting a half-alive
+	// poll with revoked credentials.
+	var assoc, hotspot, lease, arp, ifaces, internet json.RawMessage
+	var authFailure error
+	if !degraded {
+		// The member sections go to the member's own RCI; the controller's
+		// client only answers for the unit it points at.
+		sectionsAPI := api
+		if unitMAC != "" {
+			sectionsAPI = memberAPI
+		}
+		optional := func(dst *json.RawMessage, path string) {
+			raw, err := sectionsAPI.Get(ctx, path)
+			if err == nil {
+				*dst = raw
+				return
+			}
+			if isAuth(err) {
+				authFailure = err
+				return
+			}
+			if !isNotFound(err) {
+				slog.Debug("keenetic: section unavailable", "path", path, "err", err)
+			}
+		}
+		optional(&assoc, "show/associations")
+		optional(&hotspot, "show/ip/hotspot")
+		var leaseErr error
+		lease, _, leaseErr = sectionsAPI.TryGet(ctx, "show/ip/dhcp/lease", "show/ip/dhcp/leases", "show/ip/dhcp/bindings")
+		if leaseErr != nil {
+			if isAuth(leaseErr) {
+				authFailure = leaseErr
+			}
+			lease = nil
+		}
+		optional(&arp, "show/ip/arp")
+		optional(&ifaces, "show/interface")
+		if unitMAC == "" {
+			// Only the unit the host points at reports a WAN: a mesh member has
+			// no uplink of its own, and its internet check travels the mesh.
+			optional(&internet, "show/internet/status")
+		}
+	}
+	if authFailure != nil {
+		if unitMAC != "" {
+			// The member's own RCI rejected the credentials mid-walk: scope
+			// the failure to that unit (review round 3).
+			return nil, p.memberAuthRejected(unitMAC, memberAddr, authFailure)
+		}
+		return nil, authFailure
+	}
+
+	sec := translate.Section{
+		Version:    version,
+		System:     systemRaw,
+		Member:     member,
+		Assoc:      assoc,
+		Hotspot:    hotspot,
+		DhcpLease:  lease,
+		Arp:        arp,
+		Internet:   internet,
+		Interfaces: ifaces,
+	}
+	data := translate.Payload(sec)
+	if data == nil {
+		return nil, fmt.Errorf("poll produced no payload sections")
+	}
+
+	// Identity: bridge MAC (member base MAC as fallback) and the interface
+	// MAC set, so the server hangs the payload on the right unit.
+	if data.System == nil {
+		data.System = &probe.SystemData{}
+	}
+	// The controller reports fw-available for every member but for itself
+	// nowhere in the show tree: derive its pending update from the mesh
+	// release pointer the controller echoes in the member entries. A
+	// member unit already carries its own fw-available through sec.Member.
+	if unitMAC == "" && data.System.FirmwareAvailable == "" {
+		ptrs := make([]json.RawMessage, 0, len(members))
+		for _, info := range members {
+			ptrs = append(ptrs, info.Raw)
+		}
+		if av := translate.ControllerFirmwareAvailable(version, ptrs); av != "" {
+			data.System.FirmwareAvailable = av
+		}
+	}
+	if data.System.BridgeMAC == "" {
+		data.System.BridgeMAC = translate.BridgeMAC(ifaces, member)
+	}
+	data.System.IfaceMACs = translate.IfaceMACs(ifaces, member)
+
+	// Rates: cumulative counters of the traffic interface (WAN on a gateway,
+	// bridge on an AP) sampled between cycles, per unit.
+	data.System.RxBps, data.System.TxBps = p.rates(unitMAC, ifaces, sec.Internet)
+
+	// Radio summary: association-derived client counts upgraded with channel,
+	// width, power and BSSID from the interface list.
+	if data.Wireless != nil {
+		data.Wireless.Radios = translate.MergeRadios(
+			data.Wireless.Radios,
+			translate.RadiosFromInterfaces(ifaces),
+		)
+	}
+
+	// Wireless clients must not include the fleet's own units: the mesh
+	// member base MACs are the identities of the mesh links.
+	if data.Wireless != nil && len(data.Wireless.Clients) > 0 {
+		exclude := map[string]bool{}
+		for mac := range members {
+			exclude[mac] = true
+		}
+		if unitMAC != "" {
+			exclude[unitMAC] = true
+		}
+		for mac := range data.Wireless.Clients {
+			if exclude[mac] {
+				delete(data.Wireless.Clients, mac)
+			}
+		}
+	}
+
+	// Topology: wired clients as FDB entries, learned from the controller's
+	// hotspot DB. Without this section the server claims these clients for
+	// the gateway's transit FDB (it sees every mesh client MAC on the port
+	// toward the mesh) and draws them as wired clients of the WRONG unit.
+	fdb := p.fdbFor(unitMAC, sec.Hotspot, meshHotspot, members)
+	var wirelessSide map[string]string
+	// Mesh children on a wireless backhaul: the member report names the unit
+	// each child attaches to (backhaul.bridge); THIS unit's FDB must learn the
+	// child's base MAC so the server's uplink evidence hangs the child here -
+	// otherwise the gateway's transit FDB claims it and the map draws the
+	// repeater as wired to the gateway. The entry is the backhaul radio band,
+	// the same hint the WirelessSide section carries (the backhaul station
+	// never appears in the association list).
+	if bridgeMAC := data.System.BridgeMAC; bridgeMAC != "" {
+		if childFDB, childSide := meshBackhaulFDB(bridgeMAC, unitMAC, members); len(childFDB) > 0 {
+			if fdb == nil {
+				fdb = map[string]string{}
+			}
+			for mac, band := range childFDB {
+				fdb[mac] = band
+			}
+			wirelessSide = childSide
+		}
+	}
+	if fdb != nil {
+		data.FDB = &probe.FDBData{MACs: fdb, WirelessSide: wirelessSide}
+	}
+	return data, nil
+}
+
+// meshBackhaulFDB returns the mesh members whose wireless backhaul attaches
+// to the unit with the given bridge MAC. unitMAC is the reported unit's own
+// base MAC ("" for the controller): a unit is never its own backhaul child.
+// Only WIRELESS members count: a wired member's backhaul "bridge" falls back
+// to the mesh root, which is not the unit at the other end of the wire - its
+// parent comes from FDB evidence.
+func meshBackhaulFDB(bridgeMAC, unitMAC string, members map[string]translate.MemberInfo) (map[string]string, map[string]string) {
+	bridge := strings.ToUpper(strings.TrimSpace(bridgeMAC))
+	if bridge == "" {
+		return nil, nil
+	}
+	self := strings.ToUpper(strings.TrimSpace(unitMAC))
+	var fdb, side map[string]string
+	for mac, info := range members {
+		if mac == self {
+			continue
+		}
+		bh := translate.MemberBackhaul(info.Raw)
+		if !bh.Wireless || bh.ParentMAC != bridge {
+			continue
+		}
+		label := bh.Band
+		if label == "" {
+			label = "MWS" // backhaul radio of an unknown band: still a real attachment
+		}
+		if fdb == nil {
+			fdb = map[string]string{}
+			side = map[string]string{}
+		}
+		fdb[mac] = label
+		if bh.Band != "" {
+			side[mac] = bh.Band
+		}
+	}
+	return fdb, side
+}
+
+// fdbFor derives the unit's FDB (MAC → physical port) from the hotspot DB.
+// The controller claims the hosts attached to itself; a member claims the
+// hosts whose mws.cid matches its own cid. nil = the source section is
+// unavailable this cycle (keep the last good FDB); an EMPTY map is a valid
+// fresh answer (no wired clients right now - clears stale entries).
+func (p *Poller) fdbFor(unitMAC string, ownHotspot, meshHotspot json.RawMessage, members map[string]translate.MemberInfo) map[string]string {
+	var raw json.RawMessage
+	var wantCID string
+	if unitMAC == "" {
+		raw = ownHotspot
+	} else {
+		info, ok := members[unitMAC]
+		if !ok || len(meshHotspot) == 0 {
+			return nil
+		}
+		raw = meshHotspot
+		wantCID = info.CID
+		if wantCID == "" {
+			return nil
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	exclude := map[string]bool{}
+	for mac := range members {
+		exclude[mac] = true
+	}
+	if unitMAC != "" {
+		exclude[unitMAC] = true
+	}
+	out := map[string]string{}
+	for _, c := range translate.HotspotWiredClients(raw) {
+		if exclude[c.MAC] {
+			continue
+		}
+		if unitMAC == "" {
+			if c.MemberCID != "" {
+				continue // belongs to that member's payload
+			}
+		} else if c.MemberCID != wantCID {
+			continue
+		}
+		out[c.MAC] = c.Port
+	}
+	return out
+}
+
+// meshHotspotDB fetches the mesh-wide hotspot DB. A 404 (unit without the
+// section) and a transient failure yield a nil section - the FDB keeps its
+// last good value - while a credential rejection is returned as a terminal
+// error for the cycle.
+func (p *Poller) meshHotspotDB(ctx context.Context, api *keeneticapi.Client) (json.RawMessage, error) {
+	raw, err := api.Get(ctx, "show/ip/hotspot")
+	switch {
+	case err == nil:
+		return raw, nil
+	case isAuth(err):
+		return nil, err
+	case isNotFound(err):
+		return nil, nil
+	default:
+		slog.Debug("keenetic: section unavailable", "path", "show/ip/hotspot", "err", err)
+		return nil, nil
+	}
+}
+
+// rates computes system rxBps/txBps from the delta of the traffic interface
+// counters. The first cycle after start (or after a counter reset) yields nil
+// rates, which the server handles as "no rate yet". Samples are per unit key
+// (the unit MAC, "" for the host unit).
+func (p *Poller) rates(unitKey string, ifaces, internet json.RawMessage) (rxBps, txBps *float64) {
+	id := translate.PickTrafficIface(translate.WanInterfaceID(internet), ifaces)
+	if id == "" {
+		return nil, nil
+	}
+	rx, tx, ok := translate.IfaceCounters(ifaces, id)
+	if !ok {
+		return nil, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	prev, had := p.samples[unitKey]
+	p.samples[unitKey] = &rateSample{rx: rx, tx: tx, at: now, ok: true}
+	if !had || !prev.ok {
+		return nil, nil
+	}
+	dt := now.Sub(prev.at).Seconds()
+	if dt <= 0 || rx < prev.rx || tx < prev.tx {
+		return nil, nil
+	}
+	// No rounding: fractional bits per second are the honest delta over the
+	// measured interval (REVIEW FIX, round 3: the old round0 helper only
+	// clamped negatives - unreachable here, the guard above rejects a
+	// decreasing counter before the math - and did not round at all).
+	rxVal := float64(rx-prev.rx) * 8 / dt
+	txVal := float64(tx-prev.tx) * 8 / dt
+	return &rxVal, &txVal
+}
+
+func isNotFound(err error) bool {
+	var nf *keeneticapi.NotFoundError
+	return errors.As(err, &nf)
+}
+
+// isAuth reports a credential rejection, which is terminal for the unit:
+// reporting a half-alive poll with revoked credentials would be a lie, and
+// retrying hammers the router's brute-force protection.
+func isAuth(err error) bool {
+	var auth *keeneticapi.AuthError
+	return errors.As(err, &auth)
+}
+
+// memberAuthRetry is how long a mesh member that rejected the fleet
+// credentials is left alone before the poller asks it again. The rejection
+// cannot heal by retrying (the same secret is sent every time), and one
+// failed login per poll interval is exactly the hammering the terminal rule
+// exists to avoid; a pusher restart forgets the cooldown and asks at once.
+const memberAuthRetry = 15 * time.Minute
+
+// memberAuthRejected records a member credential rejection and wraps it for
+// the caller: the unit fails this cycle, the other units of the fleet keep
+// reporting, and the member's RCI is not contacted again before
+// memberAuthRetry runs out.
+func (p *Poller) memberAuthRejected(unitMAC, addr string, err error) error {
+	until := p.now().Add(memberAuthRetry)
+	p.mu.Lock()
+	p.rejected[unitMAC] = until
+	p.mu.Unlock()
+	return &MemberAuthError{MAC: unitMAC, Addr: addr, Err: err, RetryAt: until}
+}
+
+// memberRejectedUntil reports the moment a member that rejected the fleet
+// credentials may be asked again (ok=false = ask it now).
+func (p *Poller) memberRejectedUntil(unitMAC string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	until, ok := p.rejected[unitMAC]
+	if ok && !p.now().Before(until) {
+		delete(p.rejected, unitMAC) // the cooldown ran out: ask the member again
+		ok = false
+	}
+	return until, ok
+}

@@ -15,6 +15,7 @@ This keeps the NetPulse server small and avoids shipping code for hardware the c
 | `opnsense/` | OPNsense HTTPS API, read-only, **beta** | System, interface counters announced as ports, IPv4 ARP, WAN rates with an explicitly selected interface, per-client traffic, memory, the hottest temperature sensor, uptime, load average and CPU usage. Validated against OPNsense 26.7 in a VM and on a user unit |
 | `asuswrt/` | Local Asuswrt/Merlin probes | System, wireless, DHCP, ARP, FDB, LLDP, interfaces and WAN data exposed by the firmware |
 | `unifi/` | UniFi controller REST API, read-only | Gateways, switches and APs of one site: FDB ports and uplink attachments, wireless clients, ARP identities and gateway uptime |
+| `keenetic/` | KeeneticOS local RCI HTTP API, read-only | A whole KeeneticOS mesh (controller + extenders): per-unit system, firmware and backhaul state, wired clients from the hotspot FDB, wireless clients with band and signal, the mesh tree from member backhaul reports, ARP/DHCP identities |
 | `fn/` | Switch web JSON backend (`/cgi/get.cgi?cmd=...`) plus its SSH CLI | Realtek RTL930x SDK managed switches (FN SWITCH 8 PRO and siblings): CPU load, port speeds, octet counters, FDB, LLDP neighbors, model, firmware, uptime; fan temperature and memory bytes from the CLI |
 
 All integrations are read-only: they read router data and do not change

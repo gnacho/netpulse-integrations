@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A credential rejection in fleet mode is scoped per unit: a member whose
+  own RCI rejects the shared account fails alone (and is retried no sooner
+  than 15 minutes later, so its brute-force protection is not hammered)
+  while the rest of the fleet keeps reporting; only the controller's own
+  rejection stops the fleet. In single-unit mode the rejection stays
+  terminal for the unit - the terminal marker no longer gets lost in the
+  error wrap.
 - An RCI answer larger than 4 MiB is rejected with an error instead of being
   parsed truncated: the section stays absent for the cycle like any
   transient failure, and whatever the router sent past the cap is not

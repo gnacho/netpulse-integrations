@@ -181,7 +181,12 @@ never commit it.
 
 - Credential rejection is terminal: the poller stops with an alert instead
   of retrying, so a wrong password cannot trip the router's brute-force
-  protection. Fix the credentials and restart the service.
+  protection. Fix the credentials and restart the service. In fleet mode the
+  scope is per unit: a rejection by the CONTROLLER (the mesh report, the
+  hotspot DB) stops the fleet, while a rejection by one member's own RCI -
+  a KeeneticOS member keeps its own user list - fails only that unit, which
+  is then retried no sooner than 15 minutes later; the rest of the fleet
+  keeps reporting.
 - The RCI session lives in a 300-second sliding window; the client
   re-authenticates transparently on 401 (once per request).
 - One RCI answer is capped at 4 MiB: a larger answer is an error (the

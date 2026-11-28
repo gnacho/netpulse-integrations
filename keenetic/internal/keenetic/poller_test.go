@@ -471,6 +471,39 @@ func TestPollSectionAuthIsTerminal(t *testing.T) {
 	if !errors.As(err, &auth) {
 		t.Fatalf("Poll error = %v, want AuthError", err)
 	}
+	// The shared loops check the marker with a direct type assertion, so the
+	// AuthError must surface unwrapped.
+	if terminal, ok := any(err).(interface{ Terminal() bool }); !ok || !terminal.Terminal() {
+		t.Fatalf("Poll error = %v, want a Terminal() marker", err)
+	}
+}
+
+// TestPollMemberAuthRejectionIsTerminal pins the single-unit consequence of
+// the round-3 fix: in this shape the rejected member IS the unit, so the
+// error must carry the Terminal() marker the shared supervisor loops check
+// (the old %w wrap hid it, and a revoked member was retried forever).
+func TestPollMemberAuthRejectionIsTerminal(t *testing.T) {
+	controller, member := fleetFixture(t)
+	member.rejectAuth = true
+	p, err := New(Config{Host: controller.server.URL, User: "viewer", Password: "x", UnitMAC: "02:AD:EF:c1:80:8a"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = p.Poll(context.Background())
+	var memberAuth *MemberAuthError
+	if !errors.As(err, &memberAuth) {
+		t.Fatalf("Poll error = %v, want MemberAuthError", err)
+	}
+	if terminal, ok := any(err).(interface{ Terminal() bool }); !ok || !terminal.Terminal() {
+		t.Fatalf("Poll error = %v, want a Terminal() marker the shared loops can see", err)
+	}
+	var auth *keeneticapi.AuthError
+	if !errors.As(err, &auth) {
+		t.Fatalf("MemberAuthError must unwrap to the underlying AuthError, got %v", err)
+	}
+	if got := member.authPOST; got != 1 {
+		t.Fatalf("member POST /auth = %d, want 1", got)
+	}
 }
 
 func TestPollMeshMemberBackhaulChildren(t *testing.T) {

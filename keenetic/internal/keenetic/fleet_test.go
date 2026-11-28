@@ -1,8 +1,10 @@
 package keenetic
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"encoding/json"
 
+	"github.com/gnacho/netpulse-integrations/keenetic/internal/keeneticapi"
 	"github.com/gnacho/netpulse/agent/probe"
 )
 
@@ -144,6 +147,144 @@ func TestFleetRunStopsOnTerminalAuth(t *testing.T) {
 	}
 	if f.authPOST != 1 {
 		t.Fatalf("auth attempts = %d, want 1 (no brute-force hammering)", f.authPOST)
+	}
+}
+
+// TestFleetMemberAuthRejectionIsUnitScoped pins the round-3 rule: one member
+// with its own stale user list fails alone, the rest of the fleet keeps
+// reporting, and the rejected member's POST /auth is not retried before the
+// cooldown runs out. Once the member accepts the credentials again, the unit
+// resumes without a restart.
+func TestFleetMemberAuthRejectionIsUnitScoped(t *testing.T) {
+	controller, member := fleetFixture(t)
+	member.rejectAuth = true
+	fleet, err := NewFleet(Config{
+		Host:     controller.server.URL,
+		User:     "viewer",
+		Password: "x",
+		Timeout:  300 * time.Millisecond,
+	}, []Unit{
+		{Slug: "keenetic-main", Token: "tok-main"},
+		{Slug: "keenetic-ap1", Token: "tok-ap1", MAC: "02:AD:EF:C1:80:8A"},
+	})
+	if err != nil {
+		t.Fatalf("NewFleet: %v", err)
+	}
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	fleet.poller.now = clock.Now
+
+	// Cycle 1: the member unit fails with the member-scoped error, the
+	// controller unit is fine.
+	results := fleet.PollAll(context.Background())
+	if len(results) != 2 {
+		t.Fatalf("results = %d, want 2", len(results))
+	}
+	if results[0].Err != nil || results[0].Data == nil {
+		t.Fatalf("controller unit failed with a member rejection: %v", results[0].Err)
+	}
+	var memberAuth *MemberAuthError
+	if !errors.As(results[1].Err, &memberAuth) {
+		t.Fatalf("member unit err = %v, want MemberAuthError", results[1].Err)
+	}
+	var auth *keeneticapi.AuthError
+	if !errors.As(results[1].Err, &auth) {
+		t.Fatalf("MemberAuthError must unwrap to the underlying AuthError, got %v", results[1].Err)
+	}
+	if terminal, ok := any(results[1].Err).(interface{ Terminal() bool }); !ok || !terminal.Terminal() {
+		t.Fatalf("err = %v, want a Terminal() marker the shared loops can see", results[1].Err)
+	}
+	if got := member.authPOST; got != 1 {
+		t.Fatalf("member POST /auth = %d, want 1", got)
+	}
+
+	// Cycles inside the cooldown: the member is skipped without a single new
+	// POST /auth; the controller keeps reporting.
+	for cycle := 2; cycle <= 3; cycle++ {
+		results = fleet.PollAll(context.Background())
+		if results[0].Err != nil {
+			t.Fatalf("cycle %d controller unit: %v", cycle, results[0].Err)
+		}
+		if !errors.As(results[1].Err, &memberAuth) || !memberAuth.Cooldown {
+			t.Fatalf("cycle %d member err = %v, want a cooldown MemberAuthError", cycle, results[1].Err)
+		}
+	}
+	if got := member.authPOST; got != 1 {
+		t.Fatalf("member POST /auth = %d across the cooldown, want 1 (no hammering)", got)
+	}
+
+	// After the cooldown the member is asked again (still rejected).
+	clock.Advance(16 * time.Minute)
+	results = fleet.PollAll(context.Background())
+	if !errors.As(results[1].Err, &memberAuth) || memberAuth.Cooldown {
+		t.Fatalf("after the cooldown the member must be asked again, got %v", results[1].Err)
+	}
+	if got := member.authPOST; got != 2 {
+		t.Fatalf("member POST /auth = %d after the cooldown, want 2", got)
+	}
+
+	// Recovery: once the member accepts the credentials again, the unit
+	// resumes on its own.
+	member.rejectAuth = false
+	clock.Advance(16 * time.Minute)
+	results = fleet.PollAll(context.Background())
+	if results[1].Err != nil {
+		t.Fatalf("member unit after the account was fixed: %v", results[1].Err)
+	}
+	if results[1].Data == nil || len(results[1].Data.Wireless.Clients) != 1 {
+		t.Fatalf("member payload incomplete after recovery: %+v", results[1].Data)
+	}
+}
+
+// TestFleetRunKeepsGoingOnMemberAuthRejection pins the Run-loop consequence:
+// a rejected member must not stop the fleet, and the log must not claim the
+// fleet stopped (the old "correct the password and restart" alert over one
+// member drove a restart loop under restart=always).
+func TestFleetRunKeepsGoingOnMemberAuthRejection(t *testing.T) {
+	controller, member := fleetFixture(t)
+	member.rejectAuth = true
+	fleet, err := NewFleet(Config{
+		Host:     controller.server.URL,
+		User:     "viewer",
+		Password: "x",
+		Timeout:  300 * time.Millisecond,
+	}, []Unit{
+		{Slug: "keenetic-main", Token: "tok-main"},
+		{Slug: "keenetic-ap1", Token: "tok-ap1", MAC: "02:AD:EF:C1:80:8A"},
+	})
+	if err != nil {
+		t.Fatalf("NewFleet: %v", err)
+	}
+	fleet.poller.now = (&fakeClock{now: time.Unix(0, 0)}).Now
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	pushed := map[string]int{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := fleet.Run(ctx, 5*time.Millisecond, func(_ context.Context, u Unit, _ *probe.PayloadData) error {
+		pushed[u.Slug]++
+		if pushed["keenetic-main"] >= 3 {
+			cancel()
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if pushed["keenetic-main"] < 3 {
+		t.Fatalf("the fleet stopped over one rejected member: pushed = %v", pushed)
+	}
+	if pushed["keenetic-ap1"] != 0 {
+		t.Fatalf("a rejected member must not push: %v", pushed)
+	}
+	log := buf.String()
+	if strings.Contains(log, "fleet stopped") {
+		t.Fatalf("a member rejection must not log the fleet-stopped alert:\n%s", log)
+	}
+	if !strings.Contains(log, "only this unit fails") {
+		t.Fatalf("missing the unit-scoped alert:\n%s", log)
 	}
 }
 

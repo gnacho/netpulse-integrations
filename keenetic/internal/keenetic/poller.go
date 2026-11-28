@@ -68,14 +68,16 @@ type rateSample struct {
 }
 
 // Poller polls units of one Keenetic installation. Safe for sequential use;
-// the mutex guards the rate samples map and the client session cache.
+// the mutex guards the rate samples map, the client session cache and the
+// member auth-retry moments.
 type Poller struct {
 	cfg Config
 
-	mu      sync.Mutex
-	samples map[string]*rateSample
-	clients map[string]*keeneticapi.Client
-	now     func() time.Time // the clock; replaced with a fake in tests
+	mu       sync.Mutex
+	samples  map[string]*rateSample
+	clients  map[string]*keeneticapi.Client
+	rejected map[string]time.Time // member base MAC -> next retry after a credential rejection
+	now      func() time.Time     // the clock; replaced with a fake in tests
 }
 
 // New validates the config.
@@ -97,10 +99,11 @@ func New(cfg Config) (*Poller, error) {
 		}
 	}
 	return &Poller{
-		cfg:     cfg,
-		samples: map[string]*rateSample{},
-		clients: map[string]*keeneticapi.Client{},
-		now:     time.Now,
+		cfg:      cfg,
+		samples:  map[string]*rateSample{},
+		clients:  map[string]*keeneticapi.Client{},
+		rejected: map[string]time.Time{},
+		now:      time.Now,
 	}, nil
 }
 
@@ -241,6 +244,39 @@ func (e *memberError) Error() string {
 	return "mesh member " + e.mac + " is not in the controller member list"
 }
 
+// MemberAuthError reports that ONE mesh member's own RCI rejected the fleet
+// credentials. A KeeneticOS member keeps its own user list (re-pairing the
+// mesh does not sync it), so the shared account can be right on the
+// controller and stale on one member. REVIEW FIX (round 3): this used to be
+// a plain %w wrap of the AuthError, which stopped the whole fleet over one
+// member and hid the Terminal() marker from the shared single-unit loops.
+type MemberAuthError struct {
+	MAC      string    // base MAC of the member
+	Addr     string    // management address the member is reached at
+	Err      error     // the underlying *keeneticapi.AuthError; nil inside the cooldown
+	Cooldown bool      // true = this cycle was skipped without contacting the member
+	RetryAt  time.Time // when the member may be asked again
+}
+
+func (e *MemberAuthError) Error() string {
+	detail := "rejected the fleet credentials"
+	if e.Cooldown {
+		detail = fmt.Sprintf("rejected the fleet credentials earlier; not retried before %s",
+			e.RetryAt.Format(time.RFC3339))
+	} else if e.Err != nil {
+		detail += ": " + e.Err.Error()
+	}
+	return fmt.Sprintf("mesh member %s (%s) %s", e.MAC, e.Addr, detail)
+}
+
+// Unwrap exposes the underlying AuthError to errors.As.
+func (e *MemberAuthError) Unwrap() error { return e.Err }
+
+// Terminal marks MemberAuthError for the shared pusher loop's
+// stop-on-terminal rule: in the single-unit shape the rejected member IS the
+// unit, so the supervisor disables it like any credential rejection.
+func (e *MemberAuthError) Terminal() bool { return true }
+
 // fetchMembers reads show/mws/member from the given client. A 404 (no mesh
 // component, or an extender) yields an empty map; other failures are logged
 // and also yield an empty map - EXCEPT a credential rejection, which
@@ -318,6 +354,7 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 	var degraded bool
 	var version, systemRaw json.RawMessage
 	var memberAPI *keeneticapi.Client // the member's own RCI (nil = unreachable)
+	var memberAddr string             // the member's base URL ("" when unusable)
 	if unitMAC == "" {
 		// The unit the host points at: the controller client IS the unit.
 		var err error
@@ -328,7 +365,6 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 			return nil, fmt.Errorf("show/system: %w", err)
 		}
 	} else {
-		memberAddr := ""
 		if memberIP != "" {
 			addr, addrErr := p.memberAddr(memberIP)
 			if addrErr != nil {
@@ -339,8 +375,18 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 					"unit", unitMAC, "member_addr", memberIP, "err", addrErr)
 			} else {
 				memberAddr = addr
-				memberAPI, _ = p.client(addr) // dial failure = unreachable member
 			}
+		}
+		if memberAddr != "" {
+			// A member that rejected the fleet credentials recently is left
+			// alone until the retry moment: the same secret cannot succeed
+			// (the member keeps its own user list), and one failed login per
+			// cycle is exactly the hammering the terminal rule exists to
+			// avoid (review round 3).
+			if until, skip := p.memberRejectedUntil(unitMAC); skip {
+				return nil, &MemberAuthError{MAC: unitMAC, Addr: memberAddr, Cooldown: true, RetryAt: until}
+			}
+			memberAPI, _ = p.client(memberAddr) // dial failure = unreachable member
 		}
 		if memberAPI == nil {
 			degraded = true
@@ -348,14 +394,17 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 			var err error
 			if version, err = memberAPI.Get(ctx, "show/version"); err != nil {
 				if isAuth(err) {
-					return nil, fmt.Errorf("member show/version: %w", err)
+					// A credential rejection from the member's own RCI is
+					// scoped to THIS unit: the fleet's other units keep
+					// reporting (review round 3).
+					return nil, p.memberAuthRejected(unitMAC, memberAddr, err)
 				}
 				degraded = true
 			}
 			if !degraded {
 				if systemRaw, err = memberAPI.Get(ctx, "show/system"); err != nil {
 					if isAuth(err) {
-						return nil, fmt.Errorf("member show/system: %w", err)
+						return nil, p.memberAuthRejected(unitMAC, memberAddr, err)
 					}
 					degraded = true
 				}
@@ -417,6 +466,11 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 		}
 	}
 	if authFailure != nil {
+		if unitMAC != "" {
+			// The member's own RCI rejected the credentials mid-walk: scope
+			// the failure to that unit (review round 3).
+			return nil, p.memberAuthRejected(unitMAC, memberAddr, authFailure)
+		}
 		return nil, authFailure
 	}
 
@@ -668,4 +722,36 @@ func isNotFound(err error) bool {
 func isAuth(err error) bool {
 	var auth *keeneticapi.AuthError
 	return errors.As(err, &auth)
+}
+
+// memberAuthRetry is how long a mesh member that rejected the fleet
+// credentials is left alone before the poller asks it again. The rejection
+// cannot heal by retrying (the same secret is sent every time), and one
+// failed login per poll interval is exactly the hammering the terminal rule
+// exists to avoid; a pusher restart forgets the cooldown and asks at once.
+const memberAuthRetry = 15 * time.Minute
+
+// memberAuthRejected records a member credential rejection and wraps it for
+// the caller: the unit fails this cycle, the other units of the fleet keep
+// reporting, and the member's RCI is not contacted again before
+// memberAuthRetry runs out.
+func (p *Poller) memberAuthRejected(unitMAC, addr string, err error) error {
+	until := p.now().Add(memberAuthRetry)
+	p.mu.Lock()
+	p.rejected[unitMAC] = until
+	p.mu.Unlock()
+	return &MemberAuthError{MAC: unitMAC, Addr: addr, Err: err, RetryAt: until}
+}
+
+// memberRejectedUntil reports the moment a member that rejected the fleet
+// credentials may be asked again (ok=false = ask it now).
+func (p *Poller) memberRejectedUntil(unitMAC string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	until, ok := p.rejected[unitMAC]
+	if ok && !p.now().Before(until) {
+		delete(p.rejected, unitMAC) // the cooldown ran out: ask the member again
+		ok = false
+	}
+	return until, ok
 }

@@ -141,9 +141,10 @@ type PushFunc func(ctx context.Context, unit Unit, data *probe.PayloadData) erro
 
 // Run cycles PollAll at the interval until ctx is cancelled: poll all units,
 // push each payload under its own slug. Collection and push failures are
-// logged per unit and retried on the next cycle; a terminal credential
-// rejection stops the fleet (the unifi rule: never hammer the router's
-// brute-force protection).
+// logged per unit and retried on the next cycle. A credential rejection by
+// the controller stops the fleet (the unifi rule: never hammer the router's
+// brute-force protection); a rejection by ONE member fails only that unit,
+// which is then retried no sooner than memberAuthRetry later.
 func (f *Fleet) Run(ctx context.Context, interval time.Duration, push PushFunc) error {
 	if interval <= 0 {
 		return errFleet("interval must be positive")
@@ -157,6 +158,21 @@ func (f *Fleet) Run(ctx context.Context, interval time.Duration, push PushFunc) 
 		for _, res := range f.PollAll(ctx) {
 			slug := res.Unit.Slug
 			if res.Err != nil {
+				var memberAuth *MemberAuthError
+				if errors.As(res.Err, &memberAuth) {
+					// REVIEW FIX (round 3): one member with its own stale
+					// user list fails alone; the rest of the fleet keeps
+					// reporting. (The plain %w wrap used to stop the whole
+					// fleet - and with restart=always that meant a restart
+					// loop hammering both routers.)
+					if memberAuth.Cooldown {
+						slog.Error("keenetic: poll failed", "slug", slug, "err", res.Err)
+					} else {
+						slog.Error("ALERT: keenetic credentials rejected by a mesh member; only this unit fails, the fleet keeps reporting",
+							"slug", slug, "unit", memberAuth.MAC, "retry_at", memberAuth.RetryAt.Format(time.RFC3339), "err", memberAuth.Err)
+					}
+					continue
+				}
 				var auth *keeneticapi.AuthError
 				if errors.As(res.Err, &auth) {
 					slog.Error("ALERT: keenetic credentials rejected; fleet stopped, correct the password and restart", "slug", slug)

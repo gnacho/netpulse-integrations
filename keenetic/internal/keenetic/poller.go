@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -102,28 +104,102 @@ func New(cfg Config) (*Poller, error) {
 	}, nil
 }
 
-// memberAddr builds a member's management URL: the controller's scheme and
-// explicitly configured port applied to the management address the member
-// report carries. LIVE FIX (review round 2): the bare report IP used to
-// default to http:// inside the client, so an HTTPS controller with a pinned
-// certificate degraded a TLS-only member (unreachable over plain http) - or
-// queried an http-accepting member WITHOUT the pin, although the pin covers
-// every fleet unit. A member address that already carries a port is used
-// as-is (host:port, the tests rely on it).
-func (p *Poller) memberAddr(memberIP string) string {
+// controllerSchemePort extracts the scheme and the explicitly configured port
+// of the configured host. A bare host talks plain HTTP (the client's own
+// default); a scheme-default port comes back empty, so nothing is appended.
+// The controller client validated this host already; the defaults below are
+// defensive.
+func (p *Poller) controllerSchemePort() (scheme, port string) {
 	host := strings.TrimSpace(p.cfg.Host)
 	if !strings.Contains(host, "://") {
-		host = "http://" + host // the client's own bare-host default
+		host = "http://" + host
 	}
 	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return "http", ""
+	}
+	return u.Scheme, u.Port()
+}
+
+// memberAddr builds the base URL of a member's own RCI: the controller's
+// scheme and explicitly configured port applied to the management address the
+// member report carries. REVIEW FIX (round 2): the bare report IP used to
+// default to http:// inside the client, so an HTTPS controller with a pinned
+// certificate degraded a TLS-only member - or queried an http-accepting
+// member WITHOUT the pin, although the pin covers every fleet unit.
+// REVIEW FIX (round 3): the address is parsed, not guessed - a colon test
+// used to read an IPv6 literal as host:port and either dropped the inherited
+// port or dialled a mis-split host.
+func (p *Poller) memberAddr(memberIP string) (string, error) {
+	scheme, port := p.controllerSchemePort()
+	auth, err := memberAuthority(memberIP, port)
 	if err != nil {
-		return memberIP // the controller client validated this host already; defensive
+		return "", err
 	}
-	addr := memberIP
-	if !strings.Contains(addr, ":") && u.Port() != "" {
-		addr += ":" + u.Port()
+	raw := scheme + "://" + auth
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("invalid member address %q", memberIP)
 	}
-	return u.Scheme + "://" + addr
+	return raw, nil
+}
+
+// memberAuthority turns one member management address into a URL authority:
+//
+//   - "host:port" / "[v6]:port": a full authority, kept as reported;
+//   - a bare IP literal: IPv6 bracketed (the zone, if any, percent-encoded),
+//     IPv4 bare;
+//   - a bare host name: bare;
+//
+// and the inherited port is appended when the address carries none. Anything
+// else - an empty address, stray brackets, multi-colon garbage, a bad port -
+// is an error: the caller then treats the member as unreachable instead of
+// dialling a broken address.
+func memberAuthority(memberIP, port string) (string, error) {
+	addr := strings.TrimSpace(memberIP)
+	if addr == "" {
+		return "", errors.New("empty member address")
+	}
+	if h, prt, err := net.SplitHostPort(addr); err == nil && h != "" && decimalPort(prt) {
+		// "host:port" / "[v6]:port": the report carries a full authority (the
+		// brackets may come back stripped from SplitHostPort). An unbracketed
+		// multi-colon host (the "fd00:" mis-split of "fd00::35") is not one:
+		// it falls through and is re-read as an IPv6 literal.
+		if strings.HasPrefix(addr, "[") || !strings.Contains(h, ":") {
+			return addr, nil
+		}
+	}
+	if strings.HasPrefix(addr, "[") {
+		return "", fmt.Errorf("invalid member address %q", addr)
+	}
+	if ip, err := netip.ParseAddr(addr); err == nil {
+		if ip.Is6() {
+			host, _ := ip.MarshalText()
+			// The zone (if any) must be percent-encoded for a URL; MarshalText
+			// leaves the raw "%" in place.
+			addr = "[" + strings.ReplaceAll(string(host), "%", "%25") + "]"
+		} else {
+			addr = ip.String()
+		}
+	} else if strings.ContainsAny(addr, ":%[]") {
+		return "", fmt.Errorf("invalid member address %q", addr)
+	}
+	if port != "" {
+		addr += ":" + port
+	}
+	return addr, nil
+}
+
+// decimalPort reports a numeric (or empty) port: net.SplitHostPort itself
+// does not validate the digits, so "fe80::1" would split into the host
+// "fe80:" and the port "1" without complaint.
+func decimalPort(prt string) bool {
+	for _, r := range prt {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // client returns the RCI client of one address, creating it on first use and
@@ -252,8 +328,19 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 			return nil, fmt.Errorf("show/system: %w", err)
 		}
 	} else {
+		memberAddr := ""
 		if memberIP != "" {
-			memberAPI, _ = p.client(p.memberAddr(memberIP)) // invalid member address = unreachable member
+			addr, addrErr := p.memberAddr(memberIP)
+			if addrErr != nil {
+				// REVIEW FIX (round 3): an address the poller cannot parse is
+				// an unreachable member with the reason in the log - not a
+				// request to a mis-split host.
+				slog.Info("keenetic: unusable member address, degrading to the controller's facts",
+					"unit", unitMAC, "member_addr", memberIP, "err", addrErr)
+			} else {
+				memberAddr = addr
+				memberAPI, _ = p.client(addr) // dial failure = unreachable member
+			}
 		}
 		if memberAPI == nil {
 			degraded = true
@@ -275,8 +362,12 @@ func (p *Poller) pollUnit(ctx context.Context, api *keeneticapi.Client, unitMAC 
 			}
 		}
 		if degraded {
+			addr := memberAddr
+			if addr == "" {
+				addr = memberIP
+			}
 			slog.Info("keenetic: member unreachable, degrading to the controller's facts",
-				"unit", unitMAC, "member_addr", p.memberAddr(memberIP))
+				"unit", unitMAC, "member_addr", addr)
 		}
 	}
 

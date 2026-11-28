@@ -117,6 +117,12 @@ port: an `https://192.168.88.2:8443` controller polls its members at
 makes (the pin is per entry; a KeeneticOS fleet runs one certificate per
 device, so an entry pins the certificate the units it contacts present).
 
+The management address is parsed, not guessed: a bare IPv6 literal is
+bracketed and inherits the controller's port (`fd00::35` becomes
+`https://[fd00::35]:8443`), a reported `host:port` passes through, and an
+address that cannot be parsed leaves the entry degraded to the controller's
+facts with the reason in the log - nothing is dialled.
+
 ### Choosing slugs and units
 
 - The controller (or a standalone router): `host` = its address, no `mac`.

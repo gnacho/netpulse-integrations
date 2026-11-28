@@ -422,6 +422,40 @@ func TestPollMemberDegradedToControllerFacts(t *testing.T) {
 	}
 }
 
+// TestPollMemberUnusableAddressDegrades pins the round-3 rule: a member
+// management address the poller cannot parse degrades the unit to the
+// controller's facts (with the reason logged) instead of dialling a mis-split
+// host or failing the poll.
+func TestPollMemberUnusableAddressDegrades(t *testing.T) {
+	controller := newFakeRCI(t, fixtureDir(t), false)
+
+	memberJSON, _ := os.ReadFile(filepath.Join(fixtureDir(t), "mws_member_mesh.json"))
+	var list []map[string]any
+	if err := json.Unmarshal(memberJSON, &list); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	list[0]["ip"] = "192.168.1.5:notaport" // an authority url.Parse rejects
+	list[0]["fw-available"] = "5.2.0"
+	rewritten, _ := json.Marshal(list)
+	controller.paths["show/mws/member"] = string(rewritten)
+
+	p, err := New(Config{Host: controller.server.URL, User: "viewer", Password: "x", UnitMAC: "02:AD:EF:c1:80:8a"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	data, err := p.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("an unparseable member address must degrade, not fail the unit: %v", err)
+	}
+	if data.System == nil || data.System.FirmwareAvailable != "5.2.0" {
+		t.Fatalf("system = %+v, want the member report's facts", data.System)
+	}
+	// The member's own sections stay absent: nothing was dialled.
+	if data.Wireless != nil && len(data.Wireless.Clients) > 0 {
+		t.Fatalf("clients = %+v, want none without the member's associations", data.Wireless.Clients)
+	}
+}
+
 // TestPollSectionAuthIsTerminal pins the auth propagation: a credential
 // revoked mid-cycle must fail the unit (terminal), not report a half-alive
 // poll with the remaining sections.
@@ -556,23 +590,50 @@ func startTLSUnit(t *testing.T, cert tls.Certificate, mux *http.ServeMux) *httpt
 	return srv
 }
 
-// TestMemberAddrInheritsSchemeAndPort pins the member address rule: the
-// controller's scheme - and its explicitly configured port - travel to the
-// member; a member address that already carries a port is used as-is.
-func TestMemberAddrInheritsSchemeAndPort(t *testing.T) {
-	cases := []struct{ host, ip, want string }{
-		{"192.168.88.2", "198.18.0.35", "http://198.18.0.35"},                     // bare host defaults to http, no port to inherit
-		{"http://192.168.88.2", "198.18.0.35", "http://198.18.0.35"},              // explicit http
-		{"https://192.168.88.2:8443", "198.18.0.35", "https://198.18.0.35:8443"},  // scheme AND explicit port travel
-		{"https://192.168.88.2", "198.18.0.35", "https://198.18.0.35"},            // default https port: nothing to append
-		{"https://192.168.88.2:8443", "198.18.0.35:80", "https://198.18.0.35:80"}, // host:port in the report is used as-is
+// TestMemberAddr pins the member address rule. Round 2: the controller's
+// scheme - and its explicitly configured port - travel to the member; a
+// member address that already carries a port is used as-is. Round 3: the
+// address is parsed, not guessed - IPv6 literals are bracketed (and inherit
+// the port), an unparseable address is rejected instead of dialled.
+func TestMemberAddr(t *testing.T) {
+	cases := []struct {
+		host, ip, want string
+		wantErr        bool
+	}{
+		{"192.168.88.2", "198.18.0.35", "http://198.18.0.35", false},                     // bare host defaults to http, no port to inherit
+		{"http://192.168.88.2", "198.18.0.35", "http://198.18.0.35", false},              // explicit http
+		{"https://192.168.88.2:8443", "198.18.0.35", "https://198.18.0.35:8443", false},  // scheme AND explicit port travel
+		{"https://192.168.88.2", "198.18.0.35", "https://198.18.0.35", false},            // default https port: nothing to append
+		{"https://192.168.88.2:8443", "198.18.0.35:80", "https://198.18.0.35:80", false}, // host:port in the report is used as-is
+		// IPv6 literals (round 3): bracketed, with the inherited port; a zone
+		// comes out percent-encoded; a reported [v6]:port passes through.
+		{"https://192.168.88.2:8443", "fd00::35", "https://[fd00::35]:8443", false},
+		{"http://192.168.88.2", "fd00::35", "http://[fd00::35]", false},
+		{"http://192.168.88.2", "fe80::1%eth0", "http://[fe80::1%25eth0]", false},
+		{"http://192.168.88.2", "[fd00::35]:80", "http://[fd00::35]:80", false},
+		// Unparseable addresses are rejected, not dialled.
+		{"http://192.168.88.2", "", "", true},
+		{"http://192.168.88.2", "[fd00::35]", "", true},           // brackets without a port
+		{"http://192.168.88.2", "host:1:2", "", true},             // multi-colon garbage
+		{"http://192.168.88.2", ":8080", "", true},                // empty host
+		{"http://192.168.88.2", "192.168.1.5:notaport", "", true}, // url.Parse rejects the port
 	}
 	for _, c := range cases {
 		p, err := New(Config{Host: c.host, User: "u", Password: "p"})
 		if err != nil {
 			t.Fatalf("New(%q): %v", c.host, err)
 		}
-		if got := p.memberAddr(c.ip); got != c.want {
+		got, err := p.memberAddr(c.ip)
+		if c.wantErr {
+			if err == nil {
+				t.Fatalf("memberAddr(%q on %q) = %q, want an error", c.ip, c.host, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("memberAddr(%q on %q): %v", c.ip, c.host, err)
+		}
+		if got != c.want {
 			t.Fatalf("memberAddr(%q on %q) = %q, want %q", c.ip, c.host, got, c.want)
 		}
 	}

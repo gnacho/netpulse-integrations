@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A member management address is parsed, not guessed: a bare IPv6 literal is
+  bracketed and inherits the controller's port, a reported `host:port` passes
+  through, and an address that cannot be parsed degrades the entry to the
+  controller's facts (with the reason logged) instead of dialling a mis-split
+  host.
+
 ## 0.1.7 - 2026-11-22
 
 - Mesh members inherit the controller's scheme and explicitly configured

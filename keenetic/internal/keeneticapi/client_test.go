@@ -289,6 +289,37 @@ func TestErrorInsideHTTP200(t *testing.T) {
 	}
 }
 
+// TestOversizedBodyIsAnError pins the round-3 fix: an answer past the 4 MiB
+// cap must be an error, not a silently truncated document parsed as if it
+// were complete. A valid JSON prefix padded past the cap is exactly that
+// trap: the truncated read used to return the prefix as ordinary data.
+func TestOversizedBodyIsAnError(t *testing.T) {
+	f := newFakeRouter(t)
+	c := clientFor(t, f)
+
+	prefix := `{"host":[]}`
+	f.paths["show/ip/arp"] = prefix + strings.Repeat(" ", maxBodyBytes)
+	_, err := c.Get(context.Background(), "show/ip/arp")
+	if err == nil {
+		t.Fatal("an oversized answer must be an error")
+	}
+	var authErr *AuthError
+	if errors.As(err, &authErr) {
+		t.Fatalf("an oversized answer is not a credential problem: %v", err)
+	}
+	var nf *NotFoundError
+	if errors.As(err, &nf) {
+		t.Fatalf("an oversized answer is not a missing section: %v", err)
+	}
+
+	// The boundary itself passes: exactly maxBodyBytes bytes (JSON plus
+	// padding) are an ordinary answer.
+	f.paths["show/ip/arp"] = prefix + strings.Repeat(" ", maxBodyBytes-len(prefix))
+	if _, err := c.Get(context.Background(), "show/ip/arp"); err != nil {
+		t.Fatalf("an answer of exactly the cap must pass: %v", err)
+	}
+}
+
 func TestAuthKeyScheme(t *testing.T) {
 	// The scheme: md5(login:realm:password) lowercase hex, then
 	// sha256(challenge + md5hex) lowercase hex. Fixed vectors so a silent

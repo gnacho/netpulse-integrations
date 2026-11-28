@@ -268,9 +268,16 @@ func (c *Client) get(ctx context.Context, path string) (json.RawMessage, error) 
 		message, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return nil, fmt.Errorf("GET /rci/%s: HTTP %d: %s", path, res.StatusCode, strings.TrimSpace(string(message)))
 	}
-	raw, err := io.ReadAll(io.LimitReader(res.Body, maxBodyBytes))
+	raw, err := io.ReadAll(io.LimitReader(res.Body, maxBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("GET /rci/%s: %w", path, err)
+	}
+	if len(raw) > maxBodyBytes {
+		// REVIEW FIX (round 3): the truncated read used to be parsed as if it
+		// were the complete answer, silently dropping whatever did not fit.
+		// An oversized answer is a wrong (or hostile) answer: reject it like
+		// any other bad response instead of walking a half document.
+		return nil, fmt.Errorf("GET /rci/%s: response exceeds the %d MiB limit", path, maxBodyBytes>>20)
 	}
 	if err := walkStatus(raw); err != nil {
 		return nil, err

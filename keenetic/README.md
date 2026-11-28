@@ -184,6 +184,9 @@ never commit it.
   protection. Fix the credentials and restart the service.
 - The RCI session lives in a 300-second sliding window; the client
   re-authenticates transparently on 401 (once per request).
+- One RCI answer is capped at 4 MiB: a larger answer is an error (the
+  section then stays absent for the cycle like any transient failure), not a
+  silently truncated document.
 - Sections that fail (or 404 on the installed firmware) are absent from the
   push; NetPulse keeps the last good value per section. A poll fails whole
   only when the unit identity (`show/version`, `show/system`) is

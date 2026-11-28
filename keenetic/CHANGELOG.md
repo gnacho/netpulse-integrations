@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- An RCI answer larger than 4 MiB is rejected with an error instead of being
+  parsed truncated: the section stays absent for the cycle like any
+  transient failure, and whatever the router sent past the cap is not
+  dropped silently.
 - A member management address is parsed, not guessed: a bare IPv6 literal is
   bracketed and inherits the controller's port, a reported `host:port` passes
   through, and an address that cannot be parsed degrades the entry to the

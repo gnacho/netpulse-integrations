@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.8 - 2026-11-28
 
 - A credential rejection in fleet mode is scoped per unit: a member whose
   own RCI rejects the shared account fails alone (and is retried no sooner

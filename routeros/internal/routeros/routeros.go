@@ -879,9 +879,16 @@ func (p *Poller) pollAPI(ctx context.Context) (*probe.PayloadData, error) {
 		return nil, err
 	}
 	data.Wireless = wireless
+	// #89: la temperatura es opcional. Las placas sin sensores no tienen el
+	// menu (hAP ac2 en 7.25 responde "no such command or directory (health)"),
+	// y un usuario de solo lectura puede no tener permiso para leerlo. Ni una
+	// cosa ni la otra deben tumbar el poll entero.
 	healthRows, err := conn.queryRows("/system/health/print")
 	if err != nil {
-		return nil, err
+		if !isMenuMissing(err) && !isPermissionDenied(err) {
+			return nil, err
+		}
+		healthRows = nil
 	}
 	if temp := routerOSTemp(healthRows); temp > 0 {
 		sys.Temp = &temp

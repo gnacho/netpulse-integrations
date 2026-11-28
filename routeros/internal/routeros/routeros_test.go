@@ -535,6 +535,45 @@ func TestPollAPIClassifiesMissingMenuByCategory(t *testing.T) {
 	}
 }
 
+// A box without health sensors answers "no such command or directory
+// (health)" to /system/health/print (issue #89, a hAP ac2 on 7.25.1), and a
+// read-only API user may be refused it. Temperature is optional, so neither
+// refusal may drop the whole poll: the unit stays online with CPU, memory,
+// ports and firmware and simply reports no temperature.
+func TestPollAPISurvivesMissingOrRefusedHealthMenu(t *testing.T) {
+	cases := []struct {
+		name  string
+		traps []string
+	}{
+		{name: "missing menu", traps: []string{"=category=0", "=message=no such command or directory (health)"}},
+		{name: "permission denied", traps: []string{"=category=9", "=message=not enough permissions"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			replies := fixtureAPIReplies()
+			replies["/system/health/print"] = [][]byte{testSentence(append([]string{"!trap"}, c.traps...)...)}
+			poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+			data, err := poller.pollAPI(context.Background())
+			if err != nil {
+				t.Fatalf("an unavailable health menu must not fail the poll: %v", err)
+			}
+			if data.System == nil {
+				t.Fatal("system section is nil")
+			}
+			if data.System.Temp != nil {
+				t.Fatalf("temp = %v, want nil without a health reading", *data.System.Temp)
+			}
+			if data.System.CPU == nil {
+				t.Fatal("cpu is nil, want the other resource readings to survive")
+			}
+			if data.FDB == nil || len(data.FDB.MACs) != 1 {
+				t.Fatalf("fdb = %+v, want the client sections to survive a missing health menu", data.FDB)
+			}
+		})
+	}
+}
+
 // A server that stops answering must fail the poll by the read deadline and
 // close the connection instead of hanging the poller.
 func TestPollAPIStalledReadFailsByDeadline(t *testing.T) {

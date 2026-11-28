@@ -3,6 +3,18 @@
 Notable changes to the RouterOS integration are documented here. The format
 follows Keep a Changelog and semantic versioning.
 
+## Unreleased
+
+### Fixed
+
+- A board without health sensors no longer drops the whole poll. On a hAP ac2
+  running 7.25.1 `/system/health/print` answers "no such command or directory
+  (health)", and the pusher treated that refusal as fatal, fell back to REST
+  (not available on that unit) and pushed nothing, leaving the unit offline.
+  The same applies to a read-only API user that is refused the menu.
+  Temperature is optional and now stays unset while CPU, memory, ports and
+  firmware keep flowing (#89).
+
 ## [0.1.8] - 2026-11-20
 
 ### Fixed

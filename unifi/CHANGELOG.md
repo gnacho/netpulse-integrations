@@ -5,6 +5,19 @@ follows Keep a Changelog and semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- CPU, memory and uptime for sites without a UniFi gateway. The system section
+  was built from the gateway only, so a site with one UniFi access point and a
+  third-party router reported no system metrics, no firmware and no unit
+  model. The single access point is now the source in that case: CPU from
+  `system-stats`, memory from `sys_stats` (used derived from the percentage
+  when the byte counters are missing), uptime, model and firmware. A gateway
+  keeps precedence whenever the site has one, and several APs with no gateway
+  select nothing instead of an arbitrary unit. Gateways report CPU and memory
+  too, which they did not before. Temperature stays unset: the block only says
+  whether the unit has a sensor (#91).
+
 ## [0.1.5] - 2026-11-15
 
 ### Added

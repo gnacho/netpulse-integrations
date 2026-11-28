@@ -33,7 +33,8 @@ Only two endpoints of one site, plus the login:
 | Gateway `wan1`/`wan2` rates | `system.rxBps`, `system.txBps`, `system.latencyMs` | The active WAN (WAN1, or WAN2 when WAN1 is down). Rates are converted from bytes per second to bits per second, and a missing reading stays absent. |
 | Port `rx_bytes`/`tx_bytes` and rates | `fdb.ports` | Gateway ports are emitted too, because switch uplinks point at them and the WAN port carries the internet traffic. The WAN port of a gateway is labelled `WAN` when the controller only gives it a generic `Port N`. |
 | Client traffic counters | `clientBw` | Cumulative bytes per client. Download is what the controller sends to the client, the same convention every other traffic source in NetPulse uses, so the server does the deltas between pushes. Clients with no counters are not emitted. |
-| Gateway device | `system.board`, `system.sysinfo.uptime`, `system.bridgeMac` | Uptime and identity of the gateway. CPU and temperature are not read. |
+| Gateway device | `system.board`, `system.sysinfo.uptime`, `system.bridgeMac` | Uptime and identity of the gateway. |
+| Device `system-stats`, `sys_stats` | `system.cpu`, `system.sysinfo.memory` | CPU percentage and memory bytes of the unit that the system section describes. Read on a gateway and, on a site with no UniFi gateway, on the single access point. Temperature is never sent: the block only says whether the unit has a sensor. |
 
 Names are sent as static reservations (a name pinned to a MAC, no address)
 because the server uses those for hosts without a lease. Reading them from a
@@ -99,5 +100,9 @@ poller has no workaround for it.
   Plain HTTP works without either.
 - Read-only by design: no adoption, no configuration, no firmware actions, and
   no cloud access.
+- The system section describes one unit: the gateway when the site has one,
+  otherwise the only access point. A site with several APs and no UniFi
+  gateway reports no system metrics, because picking one AP would present an
+  arbitrary unit as the site (#91).
 
 Forwarded names also feed NetPulse’s existing device-type inference, so previously unnamed clients may receive a different inferred type. Manual type overrides retain their existing precedence.

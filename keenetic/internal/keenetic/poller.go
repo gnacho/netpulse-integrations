@@ -73,6 +73,7 @@ type Poller struct {
 	mu      sync.Mutex
 	samples map[string]*rateSample
 	clients map[string]*keeneticapi.Client
+	now     func() time.Time // the clock; replaced with a fake in tests
 }
 
 // New validates the config.
@@ -97,6 +98,7 @@ func New(cfg Config) (*Poller, error) {
 		cfg:     cfg,
 		samples: map[string]*rateSample{},
 		clients: map[string]*keeneticapi.Client{},
+		now:     time.Now,
 	}, nil
 }
 
@@ -545,7 +547,7 @@ func (p *Poller) rates(unitKey string, ifaces, internet json.RawMessage) (rxBps,
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := time.Now()
+	now := p.now()
 	prev, had := p.samples[unitKey]
 	p.samples[unitKey] = &rateSample{rx: rx, tx: tx, at: now, ok: true}
 	if !had || !prev.ok {
@@ -555,16 +557,13 @@ func (p *Poller) rates(unitKey string, ifaces, internet json.RawMessage) (rxBps,
 	if dt <= 0 || rx < prev.rx || tx < prev.tx {
 		return nil, nil
 	}
-	rxVal := round0(float64(rx-prev.rx) * 8 / dt)
-	txVal := round0(float64(tx-prev.tx) * 8 / dt)
+	// No rounding: fractional bits per second are the honest delta over the
+	// measured interval (REVIEW FIX, round 3: the old round0 helper only
+	// clamped negatives - unreachable here, the guard above rejects a
+	// decreasing counter before the math - and did not round at all).
+	rxVal := float64(rx-prev.rx) * 8 / dt
+	txVal := float64(tx-prev.tx) * 8 / dt
 	return &rxVal, &txVal
-}
-
-func round0(v float64) float64 {
-	if v < 0 {
-		return 0
-	}
-	return v
 }
 
 func isNotFound(err error) bool {

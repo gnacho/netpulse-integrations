@@ -676,3 +676,77 @@ func TestNewRejectsBadCertFP(t *testing.T) {
 		t.Fatal("a malformed cert_fp must be rejected")
 	}
 }
+
+// fakeClock is a stepped clock for the rate tests: Advance moves time
+// without sleeping, so the delta math is exact.
+type fakeClock struct{ now time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// bridgeCounters renders a show/interface answer whose single bridge carries
+// the given cumulative counters (the shape 5.1 does not emit - the LIVE gap
+// is covered by TestNoInterfaceCountersOn51 - but other branches do).
+func bridgeCounters(rx, tx uint64) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(
+		`{"Bridge0":{"id":"Bridge0","type":"Bridge","state":"up","rxbytes":%d,"txbytes":%d}}`, rx, tx))
+}
+
+// TestRates pins the system-rate path: the traffic interface's counters
+// sampled between cycles, per unit. A first sample, a counter reset and a
+// zero interval report no rate rather than a fabricated one, and the delta
+// stays unrounded.
+func TestRates(t *testing.T) {
+	p, err := New(Config{Host: "192.168.88.2", User: "u", Password: "p"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	clock := &fakeClock{now: time.Unix(0, 0)}
+	p.now = clock.Now
+
+	// First sample: a baseline, no rate.
+	if rx, tx := p.rates("main", bridgeCounters(1000, 2000), nil); rx != nil || tx != nil {
+		t.Fatalf("first sample invented rates: %v/%v", rx, tx)
+	}
+	// Delta over 10s: 1250 B received -> 1000 bps, 2500 B sent -> 2000 bps.
+	clock.Advance(10 * time.Second)
+	rx, tx := p.rates("main", bridgeCounters(2250, 4500), nil)
+	if rx == nil || tx == nil || *rx != 1000 || *tx != 2000 {
+		t.Fatalf("rates = %v/%v, want 1000/2000 bps", rx, tx)
+	}
+	// The same instant: no interval, no rate (and no division by zero).
+	if rx, tx = p.rates("main", bridgeCounters(3000, 5000), nil); rx != nil || tx != nil {
+		t.Fatalf("a zero interval invented rates: %v/%v", rx, tx)
+	}
+	// A counter reset (reboot) is a new baseline, not a negative rate.
+	clock.Advance(30 * time.Second)
+	if rx, tx = p.rates("main", bridgeCounters(5, 5), nil); rx != nil || tx != nil {
+		t.Fatalf("a counter reset invented rates: %v/%v", rx, tx)
+	}
+	clock.Advance(10 * time.Second)
+	rx, tx = p.rates("main", bridgeCounters(10, 10), nil)
+	if rx == nil || tx == nil || *rx != 4 || *tx != 4 {
+		t.Fatalf("post-reset rates = %v/%v, want 4/4 bps from the new baseline", rx, tx)
+	}
+	// Units are isolated: another unit's samples must not feed this delta.
+	clock.Advance(10 * time.Second)
+	if rx, tx = p.rates("ap1", bridgeCounters(999999, 999999), nil); rx != nil || tx != nil {
+		t.Fatalf("another unit's first sample leaked: %v/%v", rx, tx)
+	}
+	// No rounding: one byte over three seconds stays the exact 8/3.
+	clock.Advance(3 * time.Second)
+	if rx, _ = p.rates("ap1", bridgeCounters(999999+1, 999999), nil); rx == nil || *rx < 2.6 || *rx > 2.7 {
+		t.Fatalf("1 B over 3 s = %v bps, want the exact 8/3", rx)
+	}
+	// Back to main: the interval since its own last sample is 10+3+7 = 20 s,
+	// and the delta is main's alone (2500 B -> 1000 bps, 3500 B -> 1400 bps).
+	clock.Advance(7 * time.Second)
+	rx, tx = p.rates("main", bridgeCounters(2510, 3510), nil)
+	if rx == nil || tx == nil || *rx != 1000 || *tx != 1400 {
+		t.Fatalf("rates after another unit's sample = %v/%v, want 1000/1400 bps", rx, tx)
+	}
+	// No traffic interface: no rate.
+	if rx, tx = p.rates("main", json.RawMessage(`{}`), nil); rx != nil || tx != nil {
+		t.Fatalf("an interface-less unit invented rates: %v/%v", rx, tx)
+	}
+}

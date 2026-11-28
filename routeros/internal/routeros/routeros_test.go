@@ -1161,3 +1161,360 @@ func fixtureAPIReplies() map[string][][]byte {
 		},
 	}
 }
+
+// A single command can answer with several sentences behind the terminal
+// one. RouterOS 7.24.6 (long-term, measured on an ax device) closes the
+// empty LLDP table with [!empty][!done] and its missing legacy wireless
+// menus with TWO traps and a final !done. The client has to consume the
+// whole tail or the next query reads a leftover as its own reply, which is
+// how temperature, CPU, firmware and the WAN rate went missing while the
+// earlier client sections kept working.
+func TestPollAPIDrainsMultiSentenceTrapReplies(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/ip/neighbor/lldp/print"] = [][]byte{
+		testSentence("!empty"),
+		testSentence("!done"),
+	}
+	replies["/interface/wifi/registration-table/print"] = [][]byte{
+		testSentence("!re", "=.id=*3C", "=interface=wifi1", "=mac-address=d0:ea:11:df:99:01",
+			"=signal=-55", "=authorized=true"),
+		testSentence("!done"),
+	}
+	replies["/interface/wifi/print"] = [][]byte{
+		testSentence("!re", "=name=wifi1", "=mac-address=D0:EA:11:DF:99:49",
+			"=channel.frequency=2462", "=ssid=casa"),
+		testSentence("!done"),
+	}
+	legacyTrap := [][]byte{
+		testSentence("!trap", "=category=0", "=message=no such command or directory (wireless)"),
+		testSentence("!trap", "=message=no such command prefix"),
+		testSentence("!done"),
+	}
+	replies["/interface/wireless/registration-table/print"] = legacyTrap
+	replies["/interface/wireless/print"] = legacyTrap
+	replies["/system/resource/cpu/print"] = [][]byte{
+		testSentence("!re", "=cpu=cpu0", "=load=10"),
+		testSentence("!re", "=cpu=cpu1", "=load=10"),
+		testSentence("!re", "=cpu=cpu2", "=load=10"),
+		testSentence("!re", "=cpu=cpu3", "=load=10"),
+		testSentence("!done"),
+	}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	for poll := 1; poll <= 2; poll++ {
+		data, err := poller.pollAPI(context.Background())
+		if err != nil {
+			t.Fatalf("poll %d: leftover trap sentences shifted the session: %v", poll, err)
+		}
+		sys := data.System
+		if sys == nil || sys.Temp == nil || *sys.Temp != 48 {
+			t.Fatalf("poll %d: temp = %+v, want the health row read behind the wireless traps", poll, sys)
+		}
+		if sys.CPU == nil || *sys.CPU != 10 {
+			t.Fatalf("poll %d: cpu = %v, want 10 from the four per-core rows", poll, sys.CPU)
+		}
+		if sys.FirmwareAvailable != "" {
+			t.Fatalf("poll %d: firmware = %q, want empty while installed and latest match", poll, sys.FirmwareAvailable)
+		}
+		if data.Wireless == nil || len(data.Wireless.Clients) != 1 {
+			t.Fatalf("poll %d: wireless = %+v, want the one station of the new driver", poll, data.Wireless)
+		}
+		if c := data.Wireless.Clients["D0:EA:11:DF:99:01"]; c.SignalDbm != -55 || c.Band != "2.4 GHz" || c.SSID != "casa" {
+			t.Fatalf("poll %d: station = %+v, want -55 on 2.4 GHz casa", poll, c)
+		}
+		// The empty LLDP table answered [!empty][!done]: the drain ate the
+		// second sentence and the section itself is empty-but-available.
+		if data.Lldp == nil || !data.Lldp.Available || len(data.Lldp.Neighbors) != 0 {
+			t.Fatalf("poll %d: lldp = %+v, want available with no neighbors", poll, data.Lldp)
+		}
+		if data.DHCP == nil || len(data.DHCP.Leases) != 1 {
+			t.Fatalf("poll %d: dhcp = %+v, want the lease to survive", poll, data.DHCP)
+		}
+	}
+}
+
+// sawCommand reports whether the recorded client sentences include a query.
+func sawCommand(recorded [][]string, cmd string) bool {
+	for _, sentence := range recorded {
+		if len(sentence) > 0 && sentence[0] == cmd {
+			return true
+		}
+	}
+	return false
+}
+
+// growingInterfacePrint answers /interface/print with counters that grow
+// with every poll, so the WAN rate has a nonzero delta on the second one.
+func growingInterfacePrint(replies map[string][][]byte, polls *int) func(cmd string) [][]byte {
+	return growingInterfacePrintOn(replies, polls, "ether1")
+}
+
+// growingInterfacePrintOn is growingInterfacePrint for a named interface, so a
+// test can measure the rate on the one a route row actually names.
+func growingInterfacePrintOn(replies map[string][][]byte, polls *int, iface string) func(cmd string) [][]byte {
+	return func(cmd string) [][]byte {
+		if cmd == "/interface/print" {
+			*polls++
+			return [][]byte{
+				testSentence("!re", "=name="+iface, "=type=ether", "=running=true",
+					"=mac-address=aa:bb:cc:dd:ee:01",
+					"=rx-byte="+strconv.Itoa(1000+100**polls), "=tx-byte="+strconv.Itoa(2000+50**polls)),
+				testSentence("!done"),
+			}
+		}
+		return replies[cmd]
+	}
+}
+
+// A RouterOS 7.25 default route keeps the ISP next hop as gateway and carries
+// the egress inside immediate-gw, which is the shape a read-only API user
+// prints. The rate must be measured on that interface without asking the
+// native menu, which is only the fallback for a row with no egress at all
+// (#85).
+func TestPollAPIRouteIPGatewayCarriesImmediateGW(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/ip/route/print"] = [][]byte{
+		testSentence("!re", "=.id=*1", "=dst-address=0.0.0.0/0", "=routing-table=main",
+			"=gateway=192.0.2.1", "=immediate-gw=192.0.2.1%sfp1-wan", "=vrf-interface=sfp1-wan"),
+		testSentence("!done"),
+	}
+	polls := 0
+	poller, f := fakeAPIPoller(t, growingInterfacePrintOn(replies, &polls, "sfp1-wan"), 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if data.System.RxBps != nil || data.System.TxBps != nil {
+		t.Fatalf("rates on the first poll = %+v, want none (baseline only)", data.System)
+	}
+	data, err = poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if data.System.RxBps == nil || data.System.TxBps == nil {
+		t.Fatalf("rates = %+v, want the sfp1-wan deltas of the compatibility row", data.System)
+	}
+	if sawCommand(f.recorded(), "/routing/route/print") {
+		t.Fatal("a row that already carries the egress must not trigger the native query")
+	}
+}
+
+// The compatibility /ip/route menu can be refused to the read-only API user
+// even when the CLI prints it ("not enough permissions (9)"). The native
+// /routing/route menu still answers, and its default-route row carries the
+// egress inside immediate-gw as "<gateway>%<interface>". The rate must be
+// measured on that interface and the [!trap][!done] refusal must leave the
+// session aligned for the next poll.
+func TestPollAPIRouteDeniedFallsBackToNativeMenu(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/ip/route/print"] = [][]byte{
+		testSentence("!trap", "=category=9", "=message=not enough permissions (9)"),
+		testSentence("!done"),
+	}
+	replies["/routing/route/print"] = [][]byte{
+		testSentence("!re", "=.id=*1", "=dst-address=0.0.0.0/0", "=gateway=192.168.1.1",
+			"=immediate-gw=192.168.1.1%ether1", "=distance=1"),
+		testSentence("!done"),
+	}
+	polls := 0
+	poller, f := fakeAPIPoller(t, growingInterfacePrint(replies, &polls), 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 1: a denied compatibility route menu must not fail the poll: %v", err)
+	}
+	if data.System.RxBps != nil || data.System.TxBps != nil {
+		t.Fatalf("rates on the first poll = %+v, want none (baseline only)", data.System)
+	}
+	data, err = poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if data.System.RxBps == nil || data.System.TxBps == nil {
+		t.Fatalf("rates = %+v, want the ether1 deltas of the native default route", data.System)
+	}
+	if !sawCommand(f.recorded(), "/routing/route/print") {
+		t.Fatal("the poller never queried the native routing menu")
+	}
+}
+
+// RouterOS 7 keeps rows in the compatibility /ip/route menu with a bare
+// gateway address and no interface word. That is not the WAN interface:
+// the native menu has the egress in immediate-gw and must be queried too.
+func TestPollAPIRouteRowsWithoutInterfaceFallBackToNativeMenu(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/ip/route/print"] = [][]byte{
+		testSentence("!re", "=dst-address=0.0.0.0/0", "=gateway=192.168.1.1"),
+		testSentence("!done"),
+	}
+	replies["/routing/route/print"] = [][]byte{
+		testSentence("!re", "=.id=*1", "=dst-address=0.0.0.0/0", "=gateway=192.168.1.1",
+			"=immediate-gw=192.168.1.1%ether1", "=distance=1"),
+		testSentence("!done"),
+	}
+	polls := 0
+	poller, f := fakeAPIPoller(t, growingInterfacePrint(replies, &polls), 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if data.System.RxBps != nil {
+		t.Fatalf("rates on the first poll = %+v, want none (baseline only)", data.System)
+	}
+	data, err = poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if data.System.RxBps == nil || data.System.TxBps == nil {
+		t.Fatalf("rates = %+v, want the ether1 deltas from the native immediate-gw", data.System)
+	}
+	if !sawCommand(f.recorded(), "/ip/route/print") || !sawCommand(f.recorded(), "/routing/route/print") {
+		t.Fatal("the poller must query the compatibility menu first and the native one second")
+	}
+}
+
+// A box that denies both route menus keeps the clients and pushes no rate,
+// the same honest shape as any other missing menu.
+func TestPollAPIRouteDeniedEverywhereKeepsClients(t *testing.T) {
+	replies := fixtureAPIReplies()
+	denied := [][]byte{
+		testSentence("!trap", "=category=9", "=message=not enough permissions (9)"),
+		testSentence("!done"),
+	}
+	replies["/ip/route/print"] = denied
+	replies["/routing/route/print"] = denied
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("a box that denies both route menus keeps the clients: %v", err)
+	}
+	if data.System.RxBps != nil || data.System.TxBps != nil {
+		t.Fatalf("rates = %+v, want none without any usable route menu", data.System)
+	}
+	if data.DHCP == nil || len(data.DHCP.Leases) != 1 {
+		t.Fatalf("dhcp = %+v, want the lease to survive a denied route menu", data.DHCP)
+	}
+}
+
+// check-for-updates is a write, so a read-only user gets it denied, and the
+// denial carries a trailing !done on the same reply. The re-print after it
+// must see its own answer and the route query after that its own rows, or
+// the poll starves silently.
+func TestPollAPICheckForUpdatesDeniedKeepsSessionAligned(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/system/package/update/print"] = [][]byte{
+		testSentence("!re", "=installed-version=7.24.6", "=latest-version=7.24.6"),
+		testSentence("!done"),
+	}
+	replies["/system/package/update/check-for-updates"] = [][]byte{
+		testSentence("!trap", "=category=9", "=message=not enough permissions (9)"),
+		testSentence("!done"),
+	}
+	polls := 0
+	poller, _ := fakeAPIPoller(t, growingInterfacePrint(replies, &polls), 2*time.Second)
+
+	data, err := poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 1: a denied update check must not fail the poll: %v", err)
+	}
+	if data.System.FirmwareAvailable != "" {
+		t.Fatalf("firmware = %q, want empty when the denial leaves no version", data.System.FirmwareAvailable)
+	}
+	if data.System.RxBps != nil {
+		t.Fatalf("rates on the first poll = %+v, want none (baseline only)", data.System)
+	}
+	// With the leftover !done undrained the route query below would read it
+	// as its terminal answer and the second poll would carry no rate.
+	data, err = poller.pollAPI(context.Background())
+	if err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if data.System.RxBps == nil || data.System.TxBps == nil {
+		t.Fatalf("rates = %+v, want the ether1 deltas: the denial reply was not drained", data.System)
+	}
+	if data.DHCP == nil || len(data.DHCP.Leases) != 1 {
+		t.Fatalf("dhcp = %+v, want the lease to survive", data.DHCP)
+	}
+}
+
+func TestRouterOSWANInterfaceEgressForms(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []map[string]string
+		want string
+	}{
+		{"compat interface word", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "interface": "ether1"}}, "ether1"},
+		{"compat gateway names the interface", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway": "pepephone"}}, "pepephone"},
+		{"compat bare gateway address is not an interface", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway": "192.168.1.1"}}, ""},
+		{"non default dst-address ignored", []map[string]string{
+			{"dst-address": "192.168.1.0/24", "interface": "bridge"}}, ""},
+		{"native immediate-gw egress", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "immediate-gw": "207.188.168.1%pepephone"}}, "pepephone"},
+		{"compat gateway address plus immediate-gw egress", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway": "192.0.2.1",
+				"immediate-gw": "192.0.2.1%sfp1-wan"}}, "sfp1-wan"},
+		{"native immediate-gw bare interface", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "immediate-gw": "bridge"}}, "bridge"},
+		{"native immediate-gw bare address names nothing", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "immediate-gw": "192.168.1.1"}}, ""},
+		{"gateway-status carries the state word", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway-status": "207.188.168.1%pepephone reachable"}}, "pepephone"},
+		{"gateway-status without % is a state word", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "gateway-status": "reachable"}}, ""},
+		{"list picks the entry with an egress", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "immediate-gw": "192.168.1.1,207.188.168.1%ether1"}}, "ether1"},
+		{"first default row wins", []map[string]string{
+			{"dst-address": "0.0.0.0/0", "interface": "ether1"},
+			{"dst-address": "0.0.0.0/0", "interface": "pepephone"}}, "ether1"},
+	}
+	for _, tc := range cases {
+		if got := routerOSWANInterface(tc.rows); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A reply that opens another sentence behind its terminal one and then
+// stalls leaves the rest of that sentence in the stream. The drain must fail
+// the query instead of letting the next query parse the remainder as its own
+// reply, which would push data shifted by one.
+func TestPollAPITruncatedTailFailsTheQuery(t *testing.T) {
+	replies := fixtureAPIReplies()
+	var tail bytes.Buffer
+	_ = writeRouterOSWord(&tail, "!re")
+	_ = writeRouterOSWord(&tail, "=name=half")
+	replies["/system/identity/print"] = [][]byte{
+		testSentence("!trap", "=category=0", "=message=no such command or directory"),
+		tail.Bytes(),
+	}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	if _, err := poller.pollAPI(context.Background()); err == nil {
+		t.Fatal("a truncated trailing sentence must fail the poll")
+	}
+}
+
+// !fatal is the router announcing that it closes the connection: no reply of
+// the query can follow, so the poll fails with the reason instead of waiting
+// for a sentence that never arrives.
+func TestPollAPIFatalReplyFailsTheQuery(t *testing.T) {
+	replies := fixtureAPIReplies()
+	replies["/system/identity/print"] = [][]byte{
+		testSentence("!fatal", "=message=session closed by the router"),
+	}
+	poller, _ := fakeAPIPoller(t, func(cmd string) [][]byte { return replies[cmd] }, 2*time.Second)
+
+	_, err := poller.pollAPI(context.Background())
+	if err == nil {
+		t.Fatal("a !fatal reply must fail the poll")
+	}
+	if !strings.Contains(err.Error(), "session closed by the router") {
+		t.Fatalf("err = %v, want the fatal reason", err)
+	}
+}

@@ -3,7 +3,7 @@
 Notable changes to the RouterOS integration are documented here. The format
 follows Keep a Changelog and semantic versioning.
 
-## Unreleased
+## [0.1.9] - 2026-11-28
 
 ### Fixed
 

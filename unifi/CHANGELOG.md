@@ -3,7 +3,7 @@
 Notable changes to the UniFi integration are documented here. The format
 follows Keep a Changelog and semantic versioning.
 
-## [Unreleased]
+## [0.1.6] - 2026-11-28
 
 ### Added
 
